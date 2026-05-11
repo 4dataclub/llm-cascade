@@ -1,0 +1,65 @@
+package com.dataclub.llmcascade.service;
+
+import com.dataclub.llmcascade.model.AppSetting;
+import com.dataclub.llmcascade.repository.AppSettingRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Bequemer Zugriff auf globale App-Settings (gespeichert in app_settings).
+ * Defaults werden hier zentral verwaltet.
+ */
+@Service
+public class SettingsService {
+
+    public static final String LIVE_SESSIONS_ENABLED = "liveSessionsEnabled";
+    public static final String STATISTICS_ENABLED   = "statisticsEnabled";
+
+    /** Default-Werte falls noch nichts gesetzt wurde. Hier ALLE neuen Module
+     *  eintragen, damit ein frischer DB-Start sofort sinnvolle Defaults hat. */
+    private static final Map<String, String> DEFAULTS = Map.of(
+        LIVE_SESSIONS_ENABLED, "false",
+        STATISTICS_ENABLED,    "true"
+    );
+
+    @Autowired private AppSettingRepository repo;
+
+    public boolean getBoolean(String key) {
+        return "true".equalsIgnoreCase(getString(key));
+    }
+
+    public String getString(String key) {
+        return repo.findById(key)
+            .map(AppSetting::getValue)
+            .orElseGet(() -> DEFAULTS.getOrDefault(key, ""));
+    }
+
+    public void setString(String key, String value) {
+        AppSetting s = repo.findById(key).orElseGet(() -> AppSetting.builder().key(key).build());
+        s.setValue(value);
+        repo.save(s);
+    }
+
+    public void setBoolean(String key, boolean value) {
+        setString(key, String.valueOf(value));
+    }
+
+    /** Liefert alle aktuellen Settings (öffentliche, nicht-sensible) als Map. */
+    public Map<String, String> publicSnapshot() {
+        Map<String, String> result = new HashMap<>(DEFAULTS);
+        for (AppSetting s : repo.findAll()) result.put(s.getKey(), s.getValue());
+        return result;
+    }
+
+    /**
+     * Raw-Snapshot aller Settings (key + value) -- ohne Masking, ohne Filter.
+     * Verwender muss selber maskieren wenn Werte sensibel sind.
+     */
+    public List<AppSetting> findAllRaw() {
+        return repo.findAll();
+    }
+}

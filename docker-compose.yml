@@ -1,0 +1,33 @@
+# Standalone dev/test Setup fuer llm-cascade.
+# In Produktion wird das Image OHNE eigenen Postgres verwendet -- siehe README.
+# Hier ist ein eigenständiger Postgres dabei damit "git clone && docker compose up"
+# einen voll funktionsfaehigen Service auf :8090 hat zum Entwickeln/Testen.
+
+name: llm-cascade-dev
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: llm_cascade_db
+    environment:
+      POSTGRES_DB: llm_cascade
+      POSTGRES_USER: llm_cascade
+      POSTGRES_PASSWORD: llm_cascade
+    ports: ["127.0.0.1:5732:5432"]
+    volumes:
+      - llm_cascade_pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  api:
+    build: .
+    container_name: llm_cascade_api
+    ports: ["127.0.0.1:8090:8090"]
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/llm_cascade
+      SPRING_DATASOURCE_USERNAME: llm_cascade
+      SPRING_DATASOURCE_PASSWORD: llm_cascade
+    depends_on: ["db"]
+    restart: unless-stopped
+
+volumes:
+  llm_cascade_pgdata:
