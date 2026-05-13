@@ -8,6 +8,8 @@ import com.dataclub.llmcascade.provider.LlmProvider;
 import com.dataclub.llmcascade.repository.AiModelConfigRepository;
 import com.dataclub.llmcascade.repository.LlmCallLogRepository;
 import com.dataclub.llmcascade.repository.LlmFailoverEventRepository;
+import com.dataclub.llmcascade.service.GenerateOptions;
+import com.dataclub.llmcascade.service.GenerateResult;
 import com.dataclub.llmcascade.service.LlmCascadeService;
 import com.dataclub.llmcascade.service.SettingsService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -52,10 +54,18 @@ public class ApiController {
     // ─── Generate ────────────────────────────────────────────────────────────
 
     /**
-     * Ein einzelner LLM-Call durch die Cascade.
-     * Body: {"prompt": "...", "service": "ui-i18n" (optional), "lang": "fr" (optional)}
-     * Response: {"text": "...", "model": "gemini:gemini-2.5-flash", "latencyMs": 812}
-     * Fehler: 500 mit {"error": "..."} -- typisch wenn Cascade exhausted ist.
+     * Ein einzelner LLM-Call durch die Cascade / Rotation / Fixed-Mode.
+     * Body:
+     * <pre>{
+     *   "prompt":   "...",         // Pflicht
+     *   "service":  "ui-i18n",     // optional, Tag fuers Logging
+     *   "lang":     "fr",          // optional, Tag fuers Logging
+     *   "mode":     "cascade",     // optional: "cascade" (default) | "rotate" | "fixed"
+     *   "cooldown": true,          // optional, default true. false = Cooldown-State skip
+     *   "model":    "gpt-4o"       // optional, nur fuer mode=fixed. "provider:modelId" oder nur modelId.
+     * }</pre>
+     * Response: <code>{"text": "...", "model": "gemini:gemini-2.5-flash", "latencyMs": 812, "mode": "cascade"}</code>.
+     * Fehler: 400 bei ungueltigem {@code mode}; 500 wenn Cascade exhausted / Modell nicht verfuegbar.
      */
     @PostMapping("/generate")
     public ResponseEntity<?> generate(@RequestBody Map<String, Object> body) {
@@ -65,15 +75,25 @@ public class ApiController {
         }
         String service = body.get("service") instanceof String s ? s : null;
         String lang    = body.get("lang") instanceof String l ? l : null;
-        cascade.tagNextCall(service, lang);
+        GenerateOptions.Mode mode;
+        try {
+            mode = GenerateOptions.parseMode(body.get("mode") instanceof String m ? m : null);
+        } catch (IllegalArgumentException badMode) {
+            return ResponseEntity.badRequest().body(Map.of("error", badMode.getMessage()));
+        }
+        boolean cooldown = !(body.get("cooldown") instanceof Boolean cd) || cd; // default true
+        String fixedModel = body.get("model") instanceof String fm ? fm : null;
+        GenerateOptions opts = new GenerateOptions(service, lang, mode, cooldown, fixedModel);
+
         long start = System.currentTimeMillis();
         try {
-            String text = cascade.generate(prompt);
+            GenerateResult result = cascade.generate(prompt, opts);
             long latency = System.currentTimeMillis() - start;
             Map<String, Object> out = new LinkedHashMap<>();
-            out.put("text", text);
-            out.put("model", cascade.getCurrentModel());
+            out.put("text", result.text());
+            out.put("model", result.modelUsed());
             out.put("latencyMs", latency);
+            out.put("mode", mode.name().toLowerCase());
             return ResponseEntity.ok(out);
         } catch (RuntimeException ex) {
             return ResponseEntity.internalServerError().body(Map.of("error", ex.getMessage()));
