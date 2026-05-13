@@ -15,6 +15,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Generisches Cascade-Front-End fuer alle LLM-Aufrufe.
@@ -57,6 +58,8 @@ public class LlmCascadeService {
     /** Cooldown-Ende pro {@code provider:modelId}. */
     private final Map<String, Long> cooldownUntil = new ConcurrentHashMap<>();
     private volatile int activeIdx = 0;
+    /** Rotation-Counter pro Service-Tag (fuer {@link GenerateOptions.Mode#ROTATE}). */
+    private final Map<String, AtomicInteger> cycleIdx = new ConcurrentHashMap<>();
 
     /** Call-Kontext (Service-Name + Lang) den der rufende Service via {@link #tagNextCall} setzt. */
     private static final ThreadLocal<String[]> CALL_CONTEXT = new ThreadLocal<>();
@@ -106,20 +109,42 @@ public class LlmCascadeService {
     }
 
     /**
-     * Hauptmethode: schickt Prompt durch die Cascade.
-     * Wirft {@link RuntimeException} wenn:
-     *  - kein Modell konfiguriert ist
-     *  - alle Modelle in Cooldown sind
-     *  - ein {@link LlmException.Type#CLIENT_ERROR} auftrat (Key falsch / Request malformed)
+     * Back-compat: klassischer Cascade-Call mit Cooldown. Aequivalent zu
+     * {@code generate(prompt, GenerateOptions.defaults()).text()}.
      */
     public String generate(String prompt) {
+        return generate(prompt, GenerateOptions.defaults()).text();
+    }
+
+    /**
+     * Hauptmethode: schickt Prompt durch die Cascade oder Rotation, abhaengig von {@link GenerateOptions}.
+     *
+     * Wirft {@link RuntimeException} wenn:
+     *  - kein Modell konfiguriert / verfuegbar ist
+     *  - alle Modelle in Cooldown sind (mode=cascade)
+     *  - ein {@link LlmException.Type#CLIENT_ERROR} auftrat (Key falsch / Request malformed)
+     *  - mode=fixed: das gewuenschte Modell nicht existiert oder disabled ist
+     */
+    public GenerateResult generate(String prompt, GenerateOptions opts) {
+        if (opts == null) opts = GenerateOptions.defaults();
         List<AiModelConfig> cascade = loadCascade();
         if (cascade.isEmpty()) {
             throw new RuntimeException("LLM-Cascade ist leer — keine enabled Modelle in ai_model_config.");
         }
+        GenerateOptions.Mode mode = opts.mode() == null ? GenerateOptions.Mode.CASCADE : opts.mode();
+        return switch (mode) {
+            case CASCADE -> dispatchCascade(prompt, cascade, opts);
+            case ROTATE  -> dispatchRotate(prompt, cascade, opts);
+            case FIXED   -> dispatchFixed(prompt, cascade, opts);
+        };
+    }
 
-        promoteIfPrimaryFree(cascade);
+    // ─── Mode: CASCADE (default) ─────────────────────────────────────────────
 
+    private GenerateResult dispatchCascade(String prompt, List<AiModelConfig> cascade, GenerateOptions opts) {
+        if (opts.cooldown()) {
+            promoteIfPrimaryFree(cascade);
+        }
         long now = System.currentTimeMillis();
         LlmException lastError = null;
         AiModelConfig lastModel = null;
@@ -127,8 +152,10 @@ public class LlmCascadeService {
         for (int i = activeIdx; i < cascade.size(); i++) {
             AiModelConfig cfg = cascade.get(i);
             String stateKey = stateKey(cfg);
-            Long until = cooldownUntil.get(stateKey);
-            if (until != null && until > now) continue; // in Cooldown
+            if (opts.cooldown()) {
+                Long until = cooldownUntil.get(stateKey);
+                if (until != null && until > now) continue;
+            }
 
             lastModel = cfg;
             LlmProvider provider = providers.get(cfg.getProvider());
@@ -145,8 +172,8 @@ public class LlmCascadeService {
             try {
                 String result = provider.generate(prompt, cfg.getModelId(), apiKey);
                 activeIdx = i;
-                log(true, result == null ? 0 : result.length(), cfg);
-                return result;
+                log(true, result == null ? 0 : result.length(), cfg, opts);
+                return new GenerateResult(result, stateKey);
 
             } catch (LlmException ex) {
                 lastError = ex;
@@ -154,36 +181,41 @@ public class LlmCascadeService {
 
                 switch (ex.getType()) {
                     case TRANSIENT -> {
-                        // einmal warten + retry SAME Modell
                         long delay = Math.min(ex.getRetryDelayMs() + SHORT_RETRY_BUFFER_MS, SHORT_RETRY_CAP_MS);
                         System.err.println("[LLM] " + stateKey + " TRANSIENT (warte " + delay + "ms, retry)");
                         sleep(delay);
                         try {
                             String result = provider.generate(prompt, cfg.getModelId(), apiKey);
                             activeIdx = i;
-                            log(true, result == null ? 0 : result.length(), cfg);
-                            return result;
+                            log(true, result == null ? 0 : result.length(), cfg, opts);
+                            return new GenerateResult(result, stateKey);
                         } catch (LlmException second) {
-                            long cdMs = Math.min(Math.max(ex.getRetryDelayMs() * 2, DEFAULT_503_COOLDOWN_MS), MAX_COOLDOWN_MS);
-                            cooldownUntil.put(stateKey, System.currentTimeMillis() + cdMs);
-                            System.err.println("[LLM] " + stateKey + " retry tot, cooldown " + (cdMs / 1000) + "s");
-                            logFailover("switch_down", stateKey, nextKey, "rpm_after_retry", (int) (cdMs / 1000));
+                            if (opts.cooldown()) {
+                                long cdMs = Math.min(Math.max(ex.getRetryDelayMs() * 2, DEFAULT_503_COOLDOWN_MS), MAX_COOLDOWN_MS);
+                                cooldownUntil.put(stateKey, System.currentTimeMillis() + cdMs);
+                                System.err.println("[LLM] " + stateKey + " retry tot, cooldown " + (cdMs / 1000) + "s");
+                                logFailover("switch_down", stateKey, nextKey, "rpm_after_retry", (int) (cdMs / 1000));
+                            }
                             lastError = second;
                         }
                     }
                     case QUOTA_EXHAUSTED -> {
-                        long cdMs = Math.min(Math.max(ex.getRetryDelayMs(), DEFAULT_503_COOLDOWN_MS), MAX_COOLDOWN_MS);
-                        cooldownUntil.put(stateKey, System.currentTimeMillis() + cdMs);
-                        System.err.println("[LLM] " + stateKey + " QUOTA_EXHAUSTED, cooldown " + (cdMs / 1000) + "s — switch");
-                        logFailover("switch_down", stateKey, nextKey, "rpd_exhausted", (int) (cdMs / 1000));
+                        if (opts.cooldown()) {
+                            long cdMs = Math.min(Math.max(ex.getRetryDelayMs(), DEFAULT_503_COOLDOWN_MS), MAX_COOLDOWN_MS);
+                            cooldownUntil.put(stateKey, System.currentTimeMillis() + cdMs);
+                            System.err.println("[LLM] " + stateKey + " QUOTA_EXHAUSTED, cooldown " + (cdMs / 1000) + "s — switch");
+                            logFailover("switch_down", stateKey, nextKey, "rpd_exhausted", (int) (cdMs / 1000));
+                        }
                     }
                     case SERVER_ERROR -> {
-                        long cdMs = cfg.getCooldown503OverrideSec() != null
-                            ? cfg.getCooldown503OverrideSec() * 1000L
-                            : DEFAULT_503_COOLDOWN_MS;
-                        cooldownUntil.put(stateKey, System.currentTimeMillis() + cdMs);
-                        System.err.println("[LLM] " + stateKey + " SERVER_ERROR (" + ex.getHttpStatus() + ") — cooldown " + (cdMs / 1000) + "s, switch");
-                        logFailover("switch_down", stateKey, nextKey, "server_error_" + ex.getHttpStatus(), (int) (cdMs / 1000));
+                        if (opts.cooldown()) {
+                            long cdMs = cfg.getCooldown503OverrideSec() != null
+                                ? cfg.getCooldown503OverrideSec() * 1000L
+                                : DEFAULT_503_COOLDOWN_MS;
+                            cooldownUntil.put(stateKey, System.currentTimeMillis() + cdMs);
+                            System.err.println("[LLM] " + stateKey + " SERVER_ERROR (" + ex.getHttpStatus() + ") — cooldown " + (cdMs / 1000) + "s, switch");
+                            logFailover("switch_down", stateKey, nextKey, "server_error_" + ex.getHttpStatus(), (int) (cdMs / 1000));
+                        }
                     }
                     case MODEL_INVALID -> {
                         autoDisable(cfg, ex);
@@ -191,8 +223,7 @@ public class LlmCascadeService {
                         System.err.println("[LLM] " + stateKey + " AUTO-DISABLED: " + ex.getMessage());
                     }
                     case CLIENT_ERROR -> {
-                        // Falscher Key, malformed request — Cascade abbrechen, sofort raus.
-                        log(false, 0, cfg);
+                        log(false, 0, cfg, opts);
                         throw new RuntimeException("LLM client error (" + ex.getHttpStatus() + ") on " + stateKey + ": " + ex.getMessage(), ex);
                     }
                 }
@@ -202,11 +233,102 @@ public class LlmCascadeService {
             }
         }
 
-        log(false, 0, lastModel);
+        log(false, 0, lastModel, opts);
         throw new RuntimeException(
             "Cascade exhausted — letztes Modell " + (lastModel == null ? "(keins)" : stateKey(lastModel))
             + ", Fehler: " + (lastError == null ? "?" : lastError.getMessage()),
             lastError);
+    }
+
+    // ─── Mode: ROTATE — Round-Robin pro Service-Tag, kein Failover ────────────
+
+    private GenerateResult dispatchRotate(String prompt, List<AiModelConfig> cascade, GenerateOptions opts) {
+        String svc = opts.service() == null ? "_" : opts.service();
+        AtomicInteger ctr = cycleIdx.computeIfAbsent(svc, k -> new AtomicInteger(0));
+        long now = System.currentTimeMillis();
+        // Bis zu cascade.size() Versuche um ein nicht-in-cooldown Modell zu finden
+        // (wenn cooldown an ist); sonst nimmt es einfach den naechsten Index.
+        for (int attempt = 0; attempt < cascade.size(); attempt++) {
+            int idx = Math.floorMod(ctr.getAndIncrement(), cascade.size());
+            AiModelConfig cfg = cascade.get(idx);
+            String stateKey = stateKey(cfg);
+            if (opts.cooldown()) {
+                Long until = cooldownUntil.get(stateKey);
+                if (until != null && until > now) continue;
+            }
+            LlmProvider provider = providers.get(cfg.getProvider());
+            if (provider == null) continue;
+            String apiKey = resolveApiKeyForSetting(cfg.getApiKeySettingKey());
+            if (apiKey == null || apiKey.isBlank()) continue;
+
+            try {
+                String result = provider.generate(prompt, cfg.getModelId(), apiKey);
+                log(true, result == null ? 0 : result.length(), cfg, opts);
+                return new GenerateResult(result, stateKey);
+            } catch (LlmException ex) {
+                if (opts.cooldown() && (ex.getType() == LlmException.Type.QUOTA_EXHAUSTED
+                                     || ex.getType() == LlmException.Type.SERVER_ERROR)) {
+                    long cdMs = cfg.getCooldown503OverrideSec() != null
+                        ? cfg.getCooldown503OverrideSec() * 1000L
+                        : DEFAULT_503_COOLDOWN_MS;
+                    cooldownUntil.put(stateKey, now + cdMs);
+                }
+                if (ex.getType() == LlmException.Type.MODEL_INVALID) autoDisable(cfg, ex);
+                if (ex.getType() == LlmException.Type.CLIENT_ERROR) {
+                    log(false, 0, cfg, opts);
+                    throw new RuntimeException("LLM client error (" + ex.getHttpStatus() + ") on " + stateKey + ": " + ex.getMessage(), ex);
+                }
+                log(false, 0, cfg, opts);
+                throw new RuntimeException("Rotate-Mode: " + stateKey + " failed (" + ex.getType() + "): " + ex.getMessage(), ex);
+            }
+        }
+        throw new RuntimeException("Rotate-Mode: kein verfuegbares Modell (alle in cooldown oder key fehlt)");
+    }
+
+    // ─── Mode: FIXED — genau das angegebene Modell, kein Failover ────────────
+
+    private GenerateResult dispatchFixed(String prompt, List<AiModelConfig> cascade, GenerateOptions opts) {
+        String target = opts.fixedModel();
+        if (target == null || target.isBlank()) {
+            throw new RuntimeException("mode=fixed verlangt 'model' im Request-Body.");
+        }
+        AiModelConfig cfg = findFixedModel(cascade, target);
+        if (cfg == null) {
+            throw new RuntimeException(
+                "mode=fixed: Modell '" + target + "' nicht in enabled+nicht-autoDisabled-Liste. "
+                + "Verfuegbar: " + getModels());
+        }
+        String stateKey = stateKey(cfg);
+        LlmProvider provider = providers.get(cfg.getProvider());
+        if (provider == null) {
+            throw new RuntimeException("mode=fixed: kein Provider-Bean fuer '" + cfg.getProvider() + "'");
+        }
+        String apiKey = resolveApiKeyForSetting(cfg.getApiKeySettingKey());
+        if (apiKey == null || apiKey.isBlank()) {
+            throw new RuntimeException("mode=fixed: Key '" + cfg.getApiKeySettingKey() + "' nicht gesetzt");
+        }
+        try {
+            String result = provider.generate(prompt, cfg.getModelId(), apiKey);
+            log(true, result == null ? 0 : result.length(), cfg, opts);
+            return new GenerateResult(result, stateKey);
+        } catch (LlmException ex) {
+            log(false, 0, cfg, opts);
+            throw new RuntimeException("Fixed-Mode: " + stateKey + " failed (" + ex.getType() + "): " + ex.getMessage(), ex);
+        }
+    }
+
+    /** Akzeptiert {@code "provider:modelId"} ODER nur {@code "modelId"}. */
+    private static AiModelConfig findFixedModel(List<AiModelConfig> cascade, String target) {
+        if (target.contains(":")) {
+            for (AiModelConfig c : cascade) {
+                if (stateKey(c).equals(target)) return c;
+            }
+        } else {
+            for (AiModelConfig c : cascade) {
+                if (target.equals(c.getModelId())) return c;
+            }
+        }
+        return null;
     }
 
     // ─── Internals ────────────────────────────────────────────────────────────
@@ -243,14 +365,19 @@ public class LlmCascadeService {
         return "";
     }
 
-    private void log(boolean success, int outputChars, AiModelConfig cfg) {
+    private void log(boolean success, int outputChars, AiModelConfig cfg, GenerateOptions opts) {
         if (callLog == null) return;
+        // opts.service/opts.lang gewinnen wenn gesetzt, sonst Fallback auf ThreadLocal-Context
         String[] ctx = CALL_CONTEXT.get();
         CALL_CONTEXT.remove();
+        String service = (opts != null && opts.service() != null) ? opts.service()
+                       : (ctx != null && ctx[0] != null) ? ctx[0] : "unknown";
+        String lang    = (opts != null && opts.lang() != null) ? opts.lang()
+                       : (ctx != null) ? ctx[1] : null;
         try {
             callLog.save(LlmCallLog.builder()
-                .service(ctx != null && ctx[0] != null ? ctx[0] : "unknown")
-                .lang(ctx != null ? ctx[1] : null)
+                .service(service)
+                .lang(lang)
                 .outputChars(outputChars)
                 .success(success)
                 .model(cfg == null ? null : cfg.getModelId())
