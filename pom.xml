@@ -10,7 +10,7 @@
 	</parent>
 	<groupId>com.dataclub</groupId>
 	<artifactId>llm-cascade</artifactId>
-	<version>0.1.0-SNAPSHOT</version>
+	<version>0.4.0</version>
 	<name>LLM Cascade Service</name>
 	<description>
 		Provider-agnostische LLM-Cascade mit Cooldown + Auto-Disable + Admin-UI-API.

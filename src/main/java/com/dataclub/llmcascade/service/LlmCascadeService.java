@@ -55,11 +55,50 @@ public class LlmCascadeService {
     @Autowired(required = false) private LlmCallLogRepository callLog;
     @Autowired(required = false) private LlmFailoverEventRepository failoverLog;
 
-    /** Cooldown-Ende pro {@code provider:modelId}. */
-    private final Map<String, Long> cooldownUntil = new ConcurrentHashMap<>();
-    private volatile int activeIdx = 0;
+    /**
+     * Cascade-Bereich der genutzt wird wenn der Aufrufer keine {@code category}
+     * gesetzt hat (Backward-Compat zu Phase-vor-S').
+     */
+    private static final String DEFAULT_CASCADE = "__global__";
+
+    /**
+     * Phase S' (2026-05-21): Cooldown-Map pro Cascade-Bereich (= category-Name).
+     * Outer-Key: Cascade-Name (z.B. "content", "utility", "__global__" als Default).
+     * Inner-Key: {@code provider:modelId}. Value: Cooldown-End-Timestamp in ms.
+     *
+     * Damit blockt ein 503/quota-Hit in der Content-Cascade nicht mehr die
+     * Utility-Cascade — jeder Bereich hat seine eigene Failover-State.
+     */
+    private final Map<String, Map<String, Long>> cooldownByCascade = new ConcurrentHashMap<>();
+
+    /**
+     * Phase S' (2026-05-21): Sticky-Pointer pro Cascade-Bereich. Wenn z.B. Content
+     * gerade auf gemini-flash-lite hängt (Index 1), bleibt der Pointer dort —
+     * Utility hat einen eigenen Pointer der bei deepseek (Index 0) sein kann.
+     */
+    private final Map<String, AtomicInteger> activeIdxByCascade = new ConcurrentHashMap<>();
+
     /** Rotation-Counter pro Service-Tag (fuer {@link GenerateOptions.Mode#ROTATE}). */
     private final Map<String, AtomicInteger> cycleIdx = new ConcurrentHashMap<>();
+
+    /** Cascade-Bereich-Schluessel mit Default-Fallback fuer null/leer/Backward-Compat. */
+    private static String cascadeKey(String category) {
+        return (category == null || category.isBlank()) ? DEFAULT_CASCADE : category.toLowerCase();
+    }
+
+    /** Per-Cascade-Cooldown-Map; lazy initialisiert. */
+    private Map<String, Long> cooldownMapFor(String cascadeName) {
+        return cooldownByCascade.computeIfAbsent(cascadeKey(cascadeName), k -> new ConcurrentHashMap<>());
+    }
+
+    private int activeIdxFor(String cascadeName) {
+        AtomicInteger ai = activeIdxByCascade.get(cascadeKey(cascadeName));
+        return ai == null ? 0 : ai.get();
+    }
+
+    private void setActiveIdxFor(String cascadeName, int v) {
+        activeIdxByCascade.computeIfAbsent(cascadeKey(cascadeName), k -> new AtomicInteger(0)).set(v);
+    }
 
     /** Call-Kontext (Service-Name + Lang) den der rufende Service via {@link #tagNextCall} setzt. */
     private static final ThreadLocal<String[]> CALL_CONTEXT = new ThreadLocal<>();
@@ -78,25 +117,60 @@ public class LlmCascadeService {
         return out;
     }
 
-    /** Aktuell aktives Modell in Form {@code provider:modelId} oder leer wenn Cascade leer. */
+    /**
+     * Aktuell aktives Modell in Form {@code provider:modelId} oder leer wenn Cascade leer.
+     * Liefert das Modell des Default-Cascades (Backward-Compat fuer /api/stats/cascade).
+     * Pro-Cascade-Variante siehe {@link #getCurrentModel(String)}.
+     */
     public String getCurrentModel() {
-        List<AiModelConfig> cascade = loadCascade();
+        return getCurrentModel(null);
+    }
+
+    /** Aktuell aktives Modell fuer einen bestimmten Cascade-Bereich. */
+    public String getCurrentModel(String cascadeName) {
+        List<AiModelConfig> cascade = loadCascade(cascadeName);
         if (cascade.isEmpty()) return "";
-        int idx = Math.min(activeIdx, cascade.size() - 1);
+        int idx = Math.min(activeIdxFor(cascadeName), cascade.size() - 1);
         AiModelConfig c = cascade.get(idx);
         return c.getProvider() + ":" + c.getModelId();
     }
 
-    /** Restliche Cooldown-Sekunden pro Modell ({@code provider:modelId} → seconds). */
+    /**
+     * Restliche Cooldown-Sekunden pro Modell des Default-Cascade ({@code provider:modelId} → seconds).
+     * Backward-Compat. Cascade-aware Variante siehe {@link #getCooldownState(String)}.
+     */
     public Map<String, Long> getCooldownState() {
+        return getCooldownState(null);
+    }
+
+    /** Cooldown-State fuer einen bestimmten Cascade-Bereich. */
+    public Map<String, Long> getCooldownState(String cascadeName) {
         long now = System.currentTimeMillis();
+        Map<String, Long> cdMap = cooldownByCascade.get(cascadeKey(cascadeName));
         Map<String, Long> out = new LinkedHashMap<>();
-        for (AiModelConfig c : loadCascade()) {
+        for (AiModelConfig c : loadCascade(cascadeName)) {
             String key = stateKey(c);
-            Long until = cooldownUntil.get(key);
+            Long until = cdMap == null ? null : cdMap.get(key);
             out.put(key, until == null || until <= now ? 0L : (until - now) / 1000L);
         }
         return out;
+    }
+
+    /**
+     * Phase S': Liefert distinkte Cascade-Namen aus {@code ai_model_config.category}
+     * — die Cascades die im Admin-UI als Karten erscheinen sollen.
+     * Default-Cascade ({@code __global__}) wird NICHT mitgelistet weil er nur
+     * ein Backward-Compat-Behaelter fuer category-lose Aufrufe ist.
+     */
+    public List<String> getCascadeNames() {
+        List<AiModelConfig> all = modelRepo.findByEnabledTrueAndAutoDisabledFalseOrderByOrderIdxAsc();
+        java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+        for (AiModelConfig c : all) {
+            String cat = c.getCategory();
+            if (cat == null || cat.isBlank()) continue;
+            names.add(cat.toLowerCase());
+        }
+        return new ArrayList<>(names);
     }
 
     /** Strippt Markdown-Code-Fences vom LLM-Output. Unveraendert von GeminiService uebernommen. */
@@ -143,19 +217,19 @@ public class LlmCascadeService {
     // ─── Mode: CASCADE (default) ─────────────────────────────────────────────
 
     private GenerateResult dispatchCascade(String prompt, List<AiModelConfig> cascade, GenerateOptions opts) {
-        boolean useStickyPointer = opts.category() == null || opts.category().isBlank();
-        if (useStickyPointer && opts.cooldown()) {
-            promoteIfPrimaryFree(cascade);
+        // Phase S': pro Cascade-Bereich eigener Sticky-Pointer + Cooldown-Map.
+        // Quota-Hits in Content blockieren Utility nicht mehr.
+        final String cascadeName = opts.category();
+        final Map<String, Long> cooldownUntil = cooldownMapFor(cascadeName);
+        if (opts.cooldown()) {
+            promoteIfPrimaryFree(cascade, cascadeName);
         }
         long now = System.currentTimeMillis();
         LlmException lastError = null;
         AiModelConfig lastModel = null;
 
-        // Bei kategorisierten Aufrufen ignorieren wir activeIdx und scannen ab 0.
-        // Begruendung: jeder category-Call sieht eine andere Subset-Liste -- ein
-        // gemeinsamer Sticky-Pointer haette keine konsistente Bedeutung. Cooldown
-        // verhindert weiterhin Hammering eines kaputten Modells.
-        int startIdx = useStickyPointer ? activeIdx : 0;
+        int startIdx = activeIdxFor(cascadeName);
+        if (startIdx >= cascade.size()) startIdx = 0;
         for (int i = startIdx; i < cascade.size(); i++) {
             AiModelConfig cfg = cascade.get(i);
             String stateKey = stateKey(cfg);
@@ -178,7 +252,7 @@ public class LlmCascadeService {
 
             try {
                 String result = provider.generate(prompt, cfg.getModelId(), apiKey);
-                if (useStickyPointer) activeIdx = i;
+                setActiveIdxFor(cascadeName, i);
                 log(true, result == null ? 0 : result.length(), cfg, opts);
                 return new GenerateResult(result, stateKey);
 
@@ -193,7 +267,7 @@ public class LlmCascadeService {
                         sleep(delay);
                         try {
                             String result = provider.generate(prompt, cfg.getModelId(), apiKey);
-                            activeIdx = i;
+                            setActiveIdxFor(cascadeName, i);
                             log(true, result == null ? 0 : result.length(), cfg, opts);
                             return new GenerateResult(result, stateKey);
                         } catch (LlmException second) {
@@ -250,6 +324,8 @@ public class LlmCascadeService {
     // ─── Mode: ROTATE — Round-Robin pro Service-Tag, kein Failover ────────────
 
     private GenerateResult dispatchRotate(String prompt, List<AiModelConfig> cascade, GenerateOptions opts) {
+        final String cascadeName = opts.category();
+        final Map<String, Long> cooldownUntil = cooldownMapFor(cascadeName);
         String svc = opts.service() == null ? "_" : opts.service();
         AtomicInteger ctr = cycleIdx.computeIfAbsent(svc, k -> new AtomicInteger(0));
         long now = System.currentTimeMillis();
@@ -357,15 +433,17 @@ public class LlmCascadeService {
         return modelRepo.findCascadeByCategoryIn(List.of(category.toLowerCase(), "general"));
     }
 
-    private void promoteIfPrimaryFree(List<AiModelConfig> cascade) {
-        if (activeIdx == 0 || cascade.isEmpty()) return;
+    private void promoteIfPrimaryFree(List<AiModelConfig> cascade, String cascadeName) {
+        int active = activeIdxFor(cascadeName);
+        if (active == 0 || cascade.isEmpty()) return;
         AiModelConfig primary = cascade.get(0);
-        Long until = cooldownUntil.get(stateKey(primary));
+        Map<String, Long> cdMap = cooldownByCascade.get(cascadeKey(cascadeName));
+        Long until = cdMap == null ? null : cdMap.get(stateKey(primary));
         if (until == null || until <= System.currentTimeMillis()) {
-            String from = activeIdx < cascade.size() ? stateKey(cascade.get(activeIdx)) : "(?)";
-            System.out.println("[LLM] Primary " + stateKey(primary) + " wieder frei — promote.");
+            String from = active < cascade.size() ? stateKey(cascade.get(active)) : "(?)";
+            System.out.println("[LLM] Primary " + stateKey(primary) + " (cascade=" + cascadeKey(cascadeName) + ") wieder frei — promote.");
             logFailover("promote_primary", from, stateKey(primary), "cooldown_expired_promote", null);
-            activeIdx = 0;
+            setActiveIdxFor(cascadeName, 0);
         }
     }
 
