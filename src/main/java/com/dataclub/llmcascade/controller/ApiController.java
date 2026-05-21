@@ -310,6 +310,44 @@ public class ApiController {
         return Map.of("ok", true, "key", key, "configured", !value.isBlank());
     }
 
+    // ─── Cascades (Phase S' — Bereiche mit eigener Failover-Chain + Cooldown) ───
+
+    /**
+     * Liefert alle Cascade-Bereiche dynamisch aus der DB
+     * ({@code SELECT DISTINCT category FROM ai_model_config WHERE enabled AND NOT autoDisabled}).
+     * Pro Cascade: Name, Liste der Modelle in Reihenfolge, aktuelles Modell, Cooldown-State.
+     * Wird vom Admin-UI ({@code <ki-cascades-view>}) als Quelle genutzt um N Karten zu rendern.
+     */
+    @GetMapping("/cascades")
+    public List<Map<String, Object>> cascades() {
+        List<String> names = cascade.getCascadeNames();
+        List<Map<String, Object>> out = new ArrayList<>();
+        // Default-Cascade ("__global__") nur listen wenn es Modelle ohne category gibt.
+        // Wir starten mit den expliziten Namen — der Konsument seedet typischerweise
+        // mit category-Werten, dadurch ist diese Liste die "Wahrheit" fuer die UI.
+        for (String name : names) {
+            out.add(buildCascadeView(name));
+        }
+        return out;
+    }
+
+    /** Detail-View einer Cascade — gleiche Struktur wie ein Eintrag von {@link #cascades()}. */
+    @GetMapping("/cascades/{name}")
+    public Map<String, Object> cascadeDetail(@PathVariable String name) {
+        return buildCascadeView(name);
+    }
+
+    private Map<String, Object> buildCascadeView(String name) {
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("name", name);
+        view.put("currentModel", cascade.getCurrentModel(name));
+        view.put("cooldownSec", cascade.getCooldownState(name));
+        // Modelle dieser Cascade (inkl. general-Fallback bei nicht-default-Namen)
+        // werden vom Frontend nicht hier eingebettet — UI liest /api/models und
+        // filtert nach `category`. Spart Datendopplung und haelt die Liste atomisch.
+        return view;
+    }
+
     // ─── Stats ───────────────────────────────────────────────────────────────
 
     @GetMapping("/stats/cascade")
