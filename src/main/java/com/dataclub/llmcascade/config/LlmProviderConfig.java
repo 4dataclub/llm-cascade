@@ -2,21 +2,23 @@ package com.dataclub.llmcascade.config;
 
 import com.dataclub.llmcascade.provider.LlmProvider;
 import com.dataclub.llmcascade.provider.OpenAiCompatProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
  * Bean-Registrierung der OpenAI-kompatiblen Provider unter unterschiedlichen Namen.
  *
- * Eine Klasse ({@link OpenAiCompatProvider}), drei Bean-Namen, jeweils mit
+ * Eine Klasse ({@link OpenAiCompatProvider}), mehrere Bean-Namen, jeweils mit
  * anderem baseUrl-Konstruktor-Parameter. Plus ein generischer "openai_compat"-Bean
  * mit dem OpenRouter-Default (User kann das Modell mit eigenem baseUrl-Hinweis
  * im displayName dokumentieren -- echte per-Modell-baseUrl waere Phase 5).
  *
  * Beans:
  *  "openai"         → api.openai.com/v1
- *  "openrouter"     → openrouter.ai/api/v1
+ *  "openrouter"     → ${OPENROUTER_BASE_URL:-openrouter.ai/api/v1}
  *  "deepseek"       → api.deepseek.com/v1
+ *  "ollama"         → ${OLLAMA_BASE_URL:-http://ollama:11434/v1}  (Phase N: lokales LLM)
  *  "openai_compat"  → openrouter.ai/api/v1 (catch-all default)
  *
  * Spring's @Autowired Map&lt;String, LlmProvider&gt; im LlmCascadeService bekommt
@@ -31,13 +33,28 @@ public class LlmProviderConfig {
     }
 
     @Bean(name = "openrouter")
-    public LlmProvider openrouterProvider() {
-        return new OpenAiCompatProvider("https://openrouter.ai/api/v1");
+    public LlmProvider openrouterProvider(
+        @Value("${openrouter.base-url:https://openrouter.ai/api/v1}") String baseUrl
+    ) {
+        return new OpenAiCompatProvider(baseUrl);
     }
 
     @Bean(name = "deepseek")
     public LlmProvider deepseekProvider() {
         return new OpenAiCompatProvider("https://api.deepseek.com/v1");
+    }
+
+    /**
+     * Lokales LLM ueber Ollama (Phase N -- siehe TODOS.md R.7).
+     * Ollama spricht OpenAI-kompatibles /v1-Protokoll, daher gleicher Adapter.
+     * Default-baseUrl zeigt auf den `ollama`-Service im docker-compose-Profile
+     * "local-llm". Lokal-Dev ohne Container: {@code OLLAMA_BASE_URL=http://localhost:11434/v1}.
+     */
+    @Bean(name = "ollama")
+    public LlmProvider ollamaProvider(
+        @Value("${ollama.base-url:http://ollama:11434/v1}") String baseUrl
+    ) {
+        return new OpenAiCompatProvider(baseUrl);
     }
 
     @Bean(name = "openai_compat")

@@ -2,6 +2,8 @@ package com.dataclub.llmcascade.repository;
 
 import com.dataclub.llmcascade.model.AiModelConfig;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import java.util.List;
 import java.util.Optional;
@@ -10,6 +12,23 @@ public interface AiModelConfigRepository extends JpaRepository<AiModelConfig, Lo
 
     /** Reihenfolge in der die Cascade Modelle probiert -- ueberspringt deaktivierte + auto-disabled. */
     List<AiModelConfig> findByEnabledTrueAndAutoDisabledFalseOrderByOrderIdxAsc();
+
+    /**
+     * Kategorie-Filter fuer zweistufiges Routing. Liefert nur Modelle deren
+     * {@code category} in der uebergebenen Menge ist. Null/leer wird als
+     * "general" gewertet -- bestehende Eintraege ohne explizite Kategorie
+     * sind also fuer alle Aufrufer sichtbar.
+     *
+     * Typische Aufrufe:
+     *   - utility-Request → {@code Set.of("utility", "general")}
+     *   - content-Request → {@code Set.of("content", "general")}
+     *   - kein Filter     → siehe {@link #findByEnabledTrueAndAutoDisabledFalseOrderByOrderIdxAsc()}
+     */
+    @Query("SELECT m FROM AiModelConfig m " +
+           "WHERE m.enabled = true AND m.autoDisabled = false " +
+           "AND (COALESCE(m.category, 'general') IN :categories) " +
+           "ORDER BY m.orderIdx ASC")
+    List<AiModelConfig> findCascadeByCategoryIn(@Param("categories") List<String> categories);
 
     /** Alle (auch deaktivierte/auto-disabled), fuer Admin-UI sortiert. */
     List<AiModelConfig> findAllByOrderByOrderIdxAsc();

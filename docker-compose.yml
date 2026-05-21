@@ -26,8 +26,28 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/llm_cascade
       SPRING_DATASOURCE_USERNAME: llm_cascade
       SPRING_DATASOURCE_PASSWORD: llm_cascade
+      # Ollama-Endpoint fuer den `ollama`-Provider-Bean. Wird via `profiles: ["local-llm"]`
+      # eingeschaltet -- standard-Stack startet Ollama NICHT mit, der Container ist nur
+      # da wenn explizit `docker compose --profile local-llm up` benutzt wird.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434/v1}
     depends_on: ["db"]
     restart: unless-stopped
 
+  # Lokales LLM ueber Ollama -- optional, nur aktiv mit `--profile local-llm`.
+  # Modelle werden beim ersten Request gezogen (oder per `ollama pull gemma3:4b`
+  # in den Container reingehen). Der `ollama`-Provider-Bean spricht den
+  # /v1-OpenAI-kompatiblen Endpoint an.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: llm_cascade_ollama
+    profiles: ["local-llm"]
+    ports: ["127.0.0.1:11434:11434"]
+    volumes:
+      - llm_cascade_ollama:/root/.ollama
+    restart: unless-stopped
+    # Apple Silicon / Linux mit GPU: gpu-Konfig per `deploy.resources.reservations.devices`
+    # je nach Host hinzufuegen. Default ohne GPU laeuft auch (langsamer).
+
 volumes:
   llm_cascade_pgdata:
+  llm_cascade_ollama:

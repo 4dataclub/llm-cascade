@@ -83,7 +83,11 @@ public class ApiController {
         }
         boolean cooldown = !(body.get("cooldown") instanceof Boolean cd) || cd; // default true
         String fixedModel = body.get("model") instanceof String fm ? fm : null;
-        GenerateOptions opts = new GenerateOptions(service, lang, mode, cooldown, fixedModel);
+        // Routing-Kategorie (utility | content | null). Filtert die Cascade auf Modelle
+        // mit passender category + "general" als Fallback (siehe AiModelConfigRepository).
+        String category = body.get("category") instanceof String cat && !cat.isBlank()
+            ? cat.toLowerCase() : null;
+        GenerateOptions opts = new GenerateOptions(service, lang, mode, cooldown, fixedModel, category);
 
         long start = System.currentTimeMillis();
         try {
@@ -112,6 +116,7 @@ public class ApiController {
             m.put("provider", c.getProvider());
             m.put("modelId", c.getModelId());
             m.put("displayName", c.getDisplayName());
+            m.put("category", c.getCategory() == null || c.getCategory().isBlank() ? "general" : c.getCategory());
             m.put("apiKeySettingKey", c.getApiKeySettingKey());
             m.put("enabled", c.getEnabled());
             m.put("orderIdx", c.getOrderIdx());
@@ -157,6 +162,15 @@ public class ApiController {
         if (body.containsKey("displayName")) {
             Object v = body.get("displayName");
             cfg.setDisplayName(v == null ? null : v.toString());
+        }
+        if (body.containsKey("category")) {
+            Object v = body.get("category");
+            String cat = v == null ? null : v.toString().trim().toLowerCase();
+            // Whitelist: nur erlaubte Werte; alles andere → "general".
+            cfg.setCategory(switch (cat == null ? "" : cat) {
+                case "utility", "content", "general" -> cat;
+                default -> "general";
+            });
         }
         if (body.containsKey("apiKeySettingKey")) {
             Object v = body.get("apiKeySettingKey");

@@ -13,13 +13,18 @@ package com.dataclub.llmcascade.service;
  *                      Default true.
  * @param fixedModel    Nur fuer {@link Mode#FIXED}: erzwingt dieses Modell.
  *                      Format {@code "provider:modelId"} oder nur {@code "modelId"}.
+ * @param category      Routing-Kategorie ({@code "utility"} | {@code "content"} | null).
+ *                      null = kein Filter (Backward-Compat). Bei gesetzter Kategorie
+ *                      werden zusaetzlich {@code "general"}-Modelle einbezogen, damit
+ *                      bestehende Eintraege ohne explizite Kategorie weiter funktionieren.
  */
 public record GenerateOptions(
     String service,
     String lang,
     Mode mode,
     boolean cooldown,
-    String fixedModel
+    String fixedModel,
+    String category
 ) {
     public enum Mode {
         /** Sticky activeIdx, Failover bei 429/503, Cooldown-State persistent. */
@@ -31,7 +36,12 @@ public record GenerateOptions(
     }
 
     public static GenerateOptions defaults() {
-        return new GenerateOptions(null, null, Mode.CASCADE, true, null);
+        return new GenerateOptions(null, null, Mode.CASCADE, true, null, null);
+    }
+
+    /** Convenience-Konstruktor ohne category fuer aelteren Code (Kompatibilitaet). */
+    public GenerateOptions(String service, String lang, Mode mode, boolean cooldown, String fixedModel) {
+        this(service, lang, mode, cooldown, fixedModel, null);
     }
 
     public static Mode parseMode(String s) {
