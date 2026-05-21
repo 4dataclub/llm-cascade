@@ -20,7 +20,8 @@ import java.time.LocalDateTime;
 @Table(name = "ai_model_config",
     indexes = {
         @Index(name = "ix_ai_model_order", columnList = "order_idx"),
-        @Index(name = "ix_ai_model_enabled", columnList = "enabled")
+        @Index(name = "ix_ai_model_enabled", columnList = "enabled"),
+        @Index(name = "ix_ai_model_category", columnList = "category")
     })
 @Data @NoArgsConstructor @AllArgsConstructor @Builder
 public class AiModelConfig {
@@ -46,6 +47,26 @@ public class AiModelConfig {
     /** Optionaler Anzeigename fuer UI. Wenn leer, wird modelId angezeigt. */
     @Column(name = "display_name", length = 128)
     private String displayName;
+
+    /**
+     * Kategorie fuer zweistufiges Routing (Utility vs Content):
+     *
+     *  - "utility" : i18n-Uebersetzungen, Audits, Verifier, gemini-agent Auto-PR-Tasks.
+     *                Soll auf guenstige/freie Modelle laufen.
+     *  - "content" : Lehr-Content, Pruefungsgenerierung, Chat. Hier zaehlt Qualitaet,
+     *                Gemini-Modelle bevorzugt.
+     *  - "general" : Kein Filter -- nutzbar fuer beide Kategorien (Default fuer
+     *                bestehende Eintraege). Aelterer Code ohne category-Parameter
+     *                bekommt diese Modelle automatisch zu sehen.
+     *
+     * Repository-Filter siehe {@code findByEnabledTrueAndAutoDisabledFalseAndCategoryInOrderByOrderIdxAsc}.
+     *
+     * DB-seitig nullable (damit Hibernate `ddl-auto=update` die Spalte zu bestehenden
+     * Rows hinzufuegen kann ohne ALTER mit DEFAULT). Code-Pfade behandeln {@code null}
+     * + leer als "general" -- siehe @PrePersist und Repository-Queries.
+     */
+    @Column(length = 16)
+    private String category;
 
     /**
      * Pointer auf {@link AppSetting#getKey()} unter dem der API-Key liegt
@@ -106,6 +127,7 @@ public class AiModelConfig {
         if (updatedAt == null) updatedAt = now;
         if (enabled == null) enabled = Boolean.TRUE;
         if (autoDisabled == null) autoDisabled = Boolean.FALSE;
+        if (category == null || category.isBlank()) category = "general";
     }
 
     @PreUpdate

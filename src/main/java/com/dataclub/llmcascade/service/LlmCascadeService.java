@@ -127,9 +127,10 @@ public class LlmCascadeService {
      */
     public GenerateResult generate(String prompt, GenerateOptions opts) {
         if (opts == null) opts = GenerateOptions.defaults();
-        List<AiModelConfig> cascade = loadCascade();
+        List<AiModelConfig> cascade = loadCascade(opts.category());
         if (cascade.isEmpty()) {
-            throw new RuntimeException("LLM-Cascade ist leer — keine enabled Modelle in ai_model_config.");
+            throw new RuntimeException("LLM-Cascade ist leer — keine enabled Modelle in ai_model_config"
+                + (opts.category() != null ? " fuer category=" + opts.category() : "") + ".");
         }
         GenerateOptions.Mode mode = opts.mode() == null ? GenerateOptions.Mode.CASCADE : opts.mode();
         return switch (mode) {
@@ -142,14 +143,20 @@ public class LlmCascadeService {
     // ─── Mode: CASCADE (default) ─────────────────────────────────────────────
 
     private GenerateResult dispatchCascade(String prompt, List<AiModelConfig> cascade, GenerateOptions opts) {
-        if (opts.cooldown()) {
+        boolean useStickyPointer = opts.category() == null || opts.category().isBlank();
+        if (useStickyPointer && opts.cooldown()) {
             promoteIfPrimaryFree(cascade);
         }
         long now = System.currentTimeMillis();
         LlmException lastError = null;
         AiModelConfig lastModel = null;
 
-        for (int i = activeIdx; i < cascade.size(); i++) {
+        // Bei kategorisierten Aufrufen ignorieren wir activeIdx und scannen ab 0.
+        // Begruendung: jeder category-Call sieht eine andere Subset-Liste -- ein
+        // gemeinsamer Sticky-Pointer haette keine konsistente Bedeutung. Cooldown
+        // verhindert weiterhin Hammering eines kaputten Modells.
+        int startIdx = useStickyPointer ? activeIdx : 0;
+        for (int i = startIdx; i < cascade.size(); i++) {
             AiModelConfig cfg = cascade.get(i);
             String stateKey = stateKey(cfg);
             if (opts.cooldown()) {
@@ -171,7 +178,7 @@ public class LlmCascadeService {
 
             try {
                 String result = provider.generate(prompt, cfg.getModelId(), apiKey);
-                activeIdx = i;
+                if (useStickyPointer) activeIdx = i;
                 log(true, result == null ? 0 : result.length(), cfg, opts);
                 return new GenerateResult(result, stateKey);
 
@@ -334,7 +341,20 @@ public class LlmCascadeService {
     // ─── Internals ────────────────────────────────────────────────────────────
 
     private List<AiModelConfig> loadCascade() {
-        return modelRepo.findByEnabledTrueAndAutoDisabledFalseOrderByOrderIdxAsc();
+        return loadCascade(null);
+    }
+
+    /**
+     * Lade die Cascade gefiltert auf Kategorie. {@code null} = kein Filter (alte
+     * Aufrufer). Bei gesetzter Kategorie kommen die {@code "general"}-Modelle
+     * automatisch mit dazu -- bestehende Eintraege ohne explizite Kategorie
+     * sollen weiter funktionieren bis sie umgestellt sind.
+     */
+    private List<AiModelConfig> loadCascade(String category) {
+        if (category == null || category.isBlank() || "general".equalsIgnoreCase(category)) {
+            return modelRepo.findByEnabledTrueAndAutoDisabledFalseOrderByOrderIdxAsc();
+        }
+        return modelRepo.findCascadeByCategoryIn(List.of(category.toLowerCase(), "general"));
     }
 
     private void promoteIfPrimaryFree(List<AiModelConfig> cascade) {
