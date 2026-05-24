@@ -19,6 +19,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.regex.Pattern;
 
 /**
  * HTTP-API der LLM-Cascade. Wird vom Host-Projekt (EduPro / Switcher / ...)
@@ -164,13 +165,7 @@ public class ApiController {
             cfg.setDisplayName(v == null ? null : v.toString());
         }
         if (body.containsKey("category")) {
-            Object v = body.get("category");
-            String cat = v == null ? null : v.toString().trim().toLowerCase();
-            // Whitelist: nur erlaubte Werte; alles andere → "general".
-            cfg.setCategory(switch (cat == null ? "" : cat) {
-                case "utility", "content", "general" -> cat;
-                default -> "general";
-            });
+            cfg.setCategory(normalizeCategory(body.get("category")));
         }
         if (body.containsKey("apiKeySettingKey")) {
             Object v = body.get("apiKeySettingKey");
@@ -380,5 +375,22 @@ public class ApiController {
     private static String mask(String s) {
         if (s == null || s.length() <= 8) return s == null ? "" : "***";
         return s.substring(0, 4) + "..." + s.substring(s.length() - 4);
+    }
+
+    /**
+     * Kategorien sind frei waehlbare Identifier, die ausschliesslich in der
+     * DB leben (kein Enum, keine Whitelist im Code). Akzeptiert wird jeder
+     * Wert, der dem Identifier-Format {@code [a-z0-9_-]{1,50}} entspricht;
+     * alles andere (null, leer, Sonderzeichen, zu lang) faellt auf
+     * {@code "general"} zurueck — dem Default, mit dem Routing immer
+     * funktioniert.
+     */
+    private static final Pattern CATEGORY_PATTERN = Pattern.compile("[a-z0-9_-]{1,50}");
+
+    static String normalizeCategory(Object raw) {
+        if (raw == null) return "general";
+        String cat = raw.toString().trim().toLowerCase();
+        if (cat.isEmpty()) return "general";
+        return CATEGORY_PATTERN.matcher(cat).matches() ? cat : "general";
     }
 }
