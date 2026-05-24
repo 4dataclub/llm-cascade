@@ -227,7 +227,9 @@ public class ApiController {
         }
         long start = System.currentTimeMillis();
         try {
-            String out = provider.generate("ping", cfg.getModelId(), apiKey);
+            // generateSmoke() sendet max_tokens=20 — wichtig fuer Ollama auf CPU
+            // die sonst bei "ping" eine lange vollstaendige Antwort generiert (~2-5 min).
+            String out = provider.generateSmoke(cfg.getModelId(), apiKey);
             return Map.of(
                 "ok", true,
                 "latencyMs", System.currentTimeMillis() - start,

@@ -38,13 +38,35 @@ public class OpenAiCompatProvider implements LlmProvider {
             : baseUrl;
     }
 
+    /**
+     * Smoke-Test: max_tokens=20 damit Ollama auf CPU nicht minutenlang
+     * eine vollstaendige Antwort generiert. Alle OpenAI-kompatiblen Provider
+     * respektieren max_tokens / max_completion_tokens.
+     */
+    @Override
+    public String generateSmoke(String modelId, String apiKey) {
+        return generateInternal("Reply with one word only: ok", modelId, apiKey, 20);
+    }
+
     @Override
     public String generate(String prompt, String modelId, String apiKey) {
+        return generateInternal(prompt, modelId, apiKey, null);
+    }
+
+    private String generateInternal(String prompt, String modelId, String apiKey, Integer maxTokens) {
         if (apiKey == null || apiKey.isBlank()) {
             throw new LlmException(LlmException.Type.CLIENT_ERROR, 401, "API key is empty");
         }
         Map<String, Object> userMsg = Map.of("role", "user", "content", prompt);
-        Map<String, Object> body = Map.of("model", modelId, "messages", List.of(userMsg));
+        Map<String, Object> body;
+        if (maxTokens != null) {
+            body = new java.util.LinkedHashMap<>();
+            body.put("model", modelId);
+            body.put("messages", List.of(userMsg));
+            body.put("max_tokens", maxTokens);
+        } else {
+            body = Map.of("model", modelId, "messages", List.of(userMsg));
+        }
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);

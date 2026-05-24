@@ -26,4 +26,16 @@ public interface LlmProvider {
      * @throws LlmException bei jedem nicht-2xx-Status oder Parse-Fehler
      */
     String generate(String prompt, String modelId, String apiKey);
+
+    /**
+     * Smoke-Test-Variante: erzeugt eine minimale Antwort (max 20 Tokens).
+     * Wichtig fuer lokale Modelle wie Ollama, die ohne Token-Limit auf CPU
+     * mehrere Minuten benoetigen koennen.
+     *
+     * Default-Impl: delegiert an generate() — Implementierungen die
+     * max_tokens unterstuetzen (OpenAI-compat) sollen das ueberschreiben.
+     */
+    default String generateSmoke(String modelId, String apiKey) {
+        return generate("Reply with one word only: ok", modelId, apiKey);
+    }
 }
