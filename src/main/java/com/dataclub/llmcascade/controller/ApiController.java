@@ -1,11 +1,13 @@
 package com.dataclub.llmcascade.controller;
 
 import com.dataclub.llmcascade.model.AiModelConfig;
+import com.dataclub.llmcascade.model.CategoryMeta;
 import com.dataclub.llmcascade.model.LlmCallLog;
 import com.dataclub.llmcascade.model.LlmFailoverEvent;
 import com.dataclub.llmcascade.provider.LlmException;
 import com.dataclub.llmcascade.provider.LlmProvider;
 import com.dataclub.llmcascade.repository.AiModelConfigRepository;
+import com.dataclub.llmcascade.repository.CategoryMetaRepository;
 import com.dataclub.llmcascade.repository.LlmCallLogRepository;
 import com.dataclub.llmcascade.repository.LlmFailoverEventRepository;
 import com.dataclub.llmcascade.service.GenerateOptions;
@@ -47,6 +49,7 @@ public class ApiController {
 
     @Autowired private LlmCascadeService cascade;
     @Autowired private AiModelConfigRepository modelRepo;
+    @Autowired private CategoryMetaRepository categoryMetaRepo;
     @Autowired private SettingsService settings;
     @Autowired private LlmCallLogRepository callLogRepo;
     @Autowired private LlmFailoverEventRepository failoverRepo;
@@ -276,6 +279,98 @@ public class ApiController {
     @GetMapping("/health")
     public Map<String, Object> health() {
         return Map.of("ok", true, "service", "llm-cascade");
+    }
+
+    // ─── Categories (Display-Metadaten pro Routing-Kategorie) ────────────────
+
+    /**
+     * Liste aller Kategorien — vereint:
+     *  - Implizite Kategorien aus {@code ai_model_config.category} (alles was
+     *    irgendein Modell nutzt)
+     *  - Persistierte Metadaten aus {@code category_meta} (displayName,
+     *    description, orderIdx — vom Admin via Inline-Edit gepflegt)
+     *
+     * Eine Kategorie ohne {@code category_meta}-Zeile bekommt leere Felder
+     * (Frontend rendert dann capitalized Fallback). Sortierung: orderIdx ASC
+     * NULLS LAST, dann name ASC — stabil und vorhersehbar.
+     */
+    @GetMapping("/categories")
+    public List<Map<String, Object>> categoriesList() {
+        Map<String, CategoryMeta> metas = new LinkedHashMap<>();
+        for (CategoryMeta m : categoryMetaRepo.findAll()) {
+            metas.put(m.getName(), m);
+        }
+        // Implizite Kategorien aus aktuell konfigurierten Modellen ergaenzen
+        for (AiModelConfig c : modelRepo.findAll()) {
+            String cat = c.getCategory();
+            if (cat == null || cat.isBlank()) cat = "general";
+            metas.putIfAbsent(cat, CategoryMeta.builder().name(cat).build());
+        }
+        return metas.values().stream()
+            .sorted((a, b) -> {
+                Integer oa = a.getOrderIdx();
+                Integer ob = b.getOrderIdx();
+                if (oa == null && ob == null) return a.getName().compareTo(b.getName());
+                if (oa == null) return 1;
+                if (ob == null) return -1;
+                int cmp = oa.compareTo(ob);
+                return cmp != 0 ? cmp : a.getName().compareTo(b.getName());
+            })
+            .map(m -> {
+                Map<String, Object> out = new LinkedHashMap<>();
+                out.put("name", m.getName());
+                out.put("displayName", m.getDisplayName());
+                out.put("description", m.getDescription());
+                out.put("orderIdx", m.getOrderIdx());
+                return out;
+            })
+            .toList();
+    }
+
+    /**
+     * Upsert fuer eine Kategorie. Body-Felder: {@code displayName},
+     * {@code description}, {@code orderIdx} — alle optional. Felder die nicht
+     * im Body stehen werden NICHT angefasst (Partial-Update); explizites
+     * {@code null} loescht das Feld. Der Pfad-Parameter muss dem Identifier-
+     * Format genuegen, sonst 400.
+     */
+    @PutMapping("/categories/{name}")
+    public ResponseEntity<?> categoryUpsert(@PathVariable String name, @RequestBody Map<String, Object> body) {
+        String normalized = normalizeCategory(name);
+        if (!normalized.equals(name == null ? null : name.trim().toLowerCase())) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "ok", false,
+                "error", "name muss dem Format [a-z0-9_-]{1,50} entsprechen"
+            ));
+        }
+        CategoryMeta cm = categoryMetaRepo.findById(normalized)
+            .orElseGet(() -> CategoryMeta.builder().name(normalized).build());
+        if (body.containsKey("displayName")) {
+            Object v = body.get("displayName");
+            cm.setDisplayName(v == null ? null : v.toString().trim());
+        }
+        if (body.containsKey("description")) {
+            Object v = body.get("description");
+            cm.setDescription(v == null ? null : v.toString().trim());
+        }
+        if (body.containsKey("orderIdx")) {
+            Object v = body.get("orderIdx");
+            cm.setOrderIdx(v == null ? null : ((Number) v).intValue());
+        }
+        categoryMetaRepo.save(cm);
+        return ResponseEntity.ok(Map.of("ok", true));
+    }
+
+    /**
+     * Loescht die Metadaten-Zeile (NICHT die Kategorie selbst — die lebt
+     * implizit weiter, solange ein Modell sie nutzt). Nach Delete bekommt
+     * die Kategorie in der UI wieder leere Felder + capitalized Fallback.
+     */
+    @DeleteMapping("/categories/{name}")
+    public ResponseEntity<?> categoryDelete(@PathVariable String name) {
+        if (!categoryMetaRepo.existsById(name)) return ResponseEntity.notFound().build();
+        categoryMetaRepo.deleteById(name);
+        return ResponseEntity.ok(Map.of("ok", true));
     }
 
     // ─── Settings (Keys live editierbar) ─────────────────────────────────────
