@@ -3,7 +3,7 @@ package com.dataclub.llmcascade.service;
 import com.dataclub.llmcascade.model.CategoryMeta;
 import com.dataclub.llmcascade.repository.CategoryMetaRepository;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Lazy;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
