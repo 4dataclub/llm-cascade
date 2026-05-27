@@ -51,6 +51,7 @@ public class LlmCascadeService {
     @Autowired private AiModelConfigRepository modelRepo;
     @Autowired private SettingsService settings;
     @Autowired private Map<String, LlmProvider> providers; // Spring liefert {beanName → impl}
+    @Autowired private SemanticCategoryRouter router;
 
     @Autowired(required = false) private LlmCallLogRepository callLog;
     @Autowired(required = false) private LlmFailoverEventRepository failoverLog;
@@ -201,10 +202,25 @@ public class LlmCascadeService {
      */
     public GenerateResult generate(String prompt, GenerateOptions opts) {
         if (opts == null) opts = GenerateOptions.defaults();
-        List<AiModelConfig> cascade = loadCascade(opts.category());
+
+        // Phase v0.6.0 — Semantic Routing: wenn category leer ist UND purpose
+        // gegeben, laesst der Router via Mini-LLM-Call entscheiden welche
+        // Kategorie zu dem Task passt. Resultat wird gecached. Bei Fehler
+        // fallback auf "general" — niemals Exception.
+        String resolvedCategory = opts.category();
+        if ((resolvedCategory == null || resolvedCategory.isBlank())
+            && opts.purpose() != null && !opts.purpose().isBlank()) {
+            resolvedCategory = router.resolve(opts.purpose());
+            // Opts mit der aufgeloesten Kategorie ersetzen — purpose unveraendert
+            // damit das Logging-Layer beides festhaelt.
+            opts = new GenerateOptions(opts.service(), opts.lang(), opts.mode(),
+                opts.cooldown(), opts.fixedModel(), resolvedCategory, opts.purpose());
+        }
+
+        List<AiModelConfig> cascade = loadCascade(resolvedCategory);
         if (cascade.isEmpty()) {
             throw new RuntimeException("LLM-Cascade ist leer — keine enabled Modelle in ai_model_config"
-                + (opts.category() != null ? " fuer category=" + opts.category() : "") + ".");
+                + (resolvedCategory != null ? " fuer category=" + resolvedCategory : "") + ".");
         }
         GenerateOptions.Mode mode = opts.mode() == null ? GenerateOptions.Mode.CASCADE : opts.mode();
         return switch (mode) {

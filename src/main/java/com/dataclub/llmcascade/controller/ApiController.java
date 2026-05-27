@@ -50,6 +50,7 @@ public class ApiController {
     @Autowired private LlmCascadeService cascade;
     @Autowired private AiModelConfigRepository modelRepo;
     @Autowired private CategoryMetaRepository categoryMetaRepo;
+    @Autowired private com.dataclub.llmcascade.service.SemanticCategoryRouter router;
     @Autowired private SettingsService settings;
     @Autowired private LlmCallLogRepository callLogRepo;
     @Autowired private LlmFailoverEventRepository failoverRepo;
@@ -87,11 +88,14 @@ public class ApiController {
         }
         boolean cooldown = !(body.get("cooldown") instanceof Boolean cd) || cd; // default true
         String fixedModel = body.get("model") instanceof String fm ? fm : null;
-        // Routing-Kategorie (utility | content | null). Filtert die Cascade auf Modelle
+        // Routing-Kategorie (freier Identifier oder null). Filtert die Cascade auf Modelle
         // mit passender category + "general" als Fallback (siehe AiModelConfigRepository).
         String category = body.get("category") instanceof String cat && !cat.isBlank()
             ? cat.toLowerCase() : null;
-        GenerateOptions opts = new GenerateOptions(service, lang, mode, cooldown, fixedModel, category);
+        // v0.6.0 Semantic Routing — wenn category null + purpose gesetzt, laesst
+        // LlmCascadeService den SemanticCategoryRouter entscheiden welche Kategorie passt.
+        String purpose = body.get("purpose") instanceof String p && !p.isBlank() ? p : null;
+        GenerateOptions opts = new GenerateOptions(service, lang, mode, cooldown, fixedModel, category, purpose);
 
         long start = System.currentTimeMillis();
         try {
@@ -358,6 +362,9 @@ public class ApiController {
             cm.setOrderIdx(v == null ? null : ((Number) v).intValue());
         }
         categoryMetaRepo.save(cm);
+        // v0.6.0 — Semantic-Routing-Cache leeren, sonst routen stale-decisions
+        // weiter auf die alte description.
+        router.clearCache();
         return ResponseEntity.ok(Map.of("ok", true));
     }
 
@@ -370,7 +377,61 @@ public class ApiController {
     public ResponseEntity<?> categoryDelete(@PathVariable String name) {
         if (!categoryMetaRepo.existsById(name)) return ResponseEntity.notFound().build();
         categoryMetaRepo.deleteById(name);
+        // v0.6.0 — Cache leeren, weil eine geloeschte Kategorie nicht mehr
+        // als Routing-Ziel erscheinen darf.
+        router.clearCache();
         return ResponseEntity.ok(Map.of("ok", true));
+    }
+
+    // ─── Semantic Routing (Phase v0.6.0) — Cache + Test-Preview ──────────────
+
+    /**
+     * Snapshot des Routing-Caches fuer das Admin-UI.
+     * Liefert pro Eintrag: purposeHash (cache-key), purpose (preview-Text),
+     * category (resolved), ageSeconds, expiresInSeconds. Plus globale Stats.
+     */
+    @GetMapping("/routing/cache")
+    public Map<String, Object> routingCache() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("stats", router.stats());
+        out.put("entries", router.cacheSnapshot());
+        return out;
+    }
+
+    /** Kompletter Cache leeren — z.B. wenn der User die Routing-Logik testen will. */
+    @DeleteMapping("/routing/cache")
+    public Map<String, Object> routingCacheClear() {
+        router.clearCache();
+        return Map.of("ok", true);
+    }
+
+    /** Einen einzelnen Cache-Eintrag entfernen (per purposeHash). */
+    @DeleteMapping("/routing/cache/{purposeHash}")
+    public ResponseEntity<?> routingCacheClearEntry(@PathVariable String purposeHash) {
+        boolean removed = router.clearCacheEntry(purposeHash);
+        return removed ? ResponseEntity.ok(Map.of("ok", true))
+                       : ResponseEntity.notFound().build();
+    }
+
+    /**
+     * Test-Endpoint fuer das Admin-UI: einen purpose probe-routen ohne den
+     * eigentlichen Generate-Call. Cached das Ergebnis trotzdem damit der
+     * naechste echte Call den gleichen Pfad nimmt.
+     */
+    @PostMapping("/routing/test")
+    public ResponseEntity<?> routingTest(@RequestBody Map<String, Object> body) {
+        Object p = body == null ? null : body.get("purpose");
+        if (!(p instanceof String purpose) || purpose.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("ok", false, "error", "purpose fehlt"));
+        }
+        long start = System.currentTimeMillis();
+        String resolved = router.testResolve(purpose);
+        long latency = System.currentTimeMillis() - start;
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("purpose", purpose);
+        out.put("category", resolved);
+        out.put("latencyMs", latency);
+        return ResponseEntity.ok(out);
     }
 
     // ─── Settings (Keys live editierbar) ─────────────────────────────────────
