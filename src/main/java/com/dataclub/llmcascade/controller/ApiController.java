@@ -149,7 +149,7 @@ public class ApiController {
             // v0.7.0 — providerBaseUrl (externer Inferenz-Server für lokale Modelle)
             m.put("providerBaseUrl", c.getProviderBaseUrl());
             // v0.7.0 — Hardware-Check Status (Frontend rendert rotes Badge bei false)
-            HardwareChecker.CompatibilityResult hwc = hardwareChecker.check(
+            com.dataclub.llmcascade.service.HardwareChecker.CompatibilityResult hwc = hardwareChecker.check(
                 c.getProvider(), c.getModelId(), c.getProviderBaseUrl());
             m.put("hardwareCompatible", hwc.compatible());
             m.put("hardwareReason", hwc.reason());
@@ -168,7 +168,7 @@ public class ApiController {
         }
         // v0.7.0 — Hardware-Check vor Aktivierung (verhindert OOM bei zu grossen Ollama-Modellen)
         if (Boolean.TRUE.equals(body.getEnabled())) {
-            HardwareChecker.CompatibilityResult hwc = hardwareChecker.check(
+            com.dataclub.llmcascade.service.HardwareChecker.CompatibilityResult hwc = hardwareChecker.check(
                 body.getProvider(), body.getModelId(), body.getProviderBaseUrl());
             if (!hwc.compatible()) {
                 return ResponseEntity.status(422).body(Map.of(
