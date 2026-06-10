@@ -29,13 +29,30 @@ import java.util.Map;
 public class OpenAiCompatProvider implements LlmProvider {
 
     private final String baseUrl;
+    private final boolean requiresApiKey;
     private final RestTemplate restTemplate = new RestTemplate();
 
     public OpenAiCompatProvider(String baseUrl) {
+        this(baseUrl, true);
+    }
+
+    /**
+     * v0.6.1 — Konstruktor mit explizitem {@code requiresApiKey}-Flag.
+     * Lokale Endpoints (Ollama) brauchen keinen Bearer-Token; mit
+     * {@code requiresApiKey=false} wird der Auth-Header weggelassen und
+     * ein leerer Key fuehrt nicht mehr zu 401.
+     */
+    public OpenAiCompatProvider(String baseUrl, boolean requiresApiKey) {
         // Trailing-Slash trimmen damit /chat/completions sauber angehaengt wird
         this.baseUrl = baseUrl != null && baseUrl.endsWith("/")
             ? baseUrl.substring(0, baseUrl.length() - 1)
             : baseUrl;
+        this.requiresApiKey = requiresApiKey;
+    }
+
+    /** True wenn dieser Provider zwingend einen API-Key braucht (default). */
+    public boolean requiresApiKey() {
+        return requiresApiKey;
     }
 
     /**
@@ -54,7 +71,7 @@ public class OpenAiCompatProvider implements LlmProvider {
     }
 
     private String generateInternal(String prompt, String modelId, String apiKey, Integer maxTokens) {
-        if (apiKey == null || apiKey.isBlank()) {
+        if (requiresApiKey && (apiKey == null || apiKey.isBlank())) {
             throw new LlmException(LlmException.Type.CLIENT_ERROR, 401, "API key is empty");
         }
         Map<String, Object> userMsg = Map.of("role", "user", "content", prompt);
@@ -70,7 +87,12 @@ public class OpenAiCompatProvider implements LlmProvider {
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.set("Authorization", "Bearer " + apiKey);
+        // v0.6.1 — keyless Provider (z.B. Ollama lokal) bekommen KEINEN
+        // Authorization-Header. Ollama wuerde ihn zwar ignorieren, aber wir
+        // schicken garnichts wenn der User nichts konfiguriert hat.
+        if (requiresApiKey && apiKey != null && !apiKey.isBlank()) {
+            headers.set("Authorization", "Bearer " + apiKey);
+        }
         HttpEntity<Map<String, Object>> req = new HttpEntity<>(body, headers);
 
         ResponseEntity<Map> resp;

@@ -54,7 +54,10 @@ public class LlmProviderConfig {
     public LlmProvider ollamaProvider(
         @Value("${ollama.base-url:http://ollama:11434/v1}") String baseUrl
     ) {
-        return new OpenAiCompatProvider(baseUrl);
+        // v0.6.1 — Ollama lokal braucht keinen Bearer-Token. requiresApiKey=false
+        // verhindert die 401-Exception bei leerem Settings-Wert und laesst den
+        // Authorization-Header weg.
+        return new OpenAiCompatProvider(baseUrl, false);
     }
 
     @Bean(name = "openai_compat")
