@@ -75,6 +75,7 @@ public class QualityAutoDisableService {
 
     private final AiModelConfigRepository modelRepo;
     private final QualityCalculator quality;
+    private final QualityAutoDisableNotifier notifier;
 
     @Value("${llm.cascade.quality.auto-disable.enabled:true}")
     private boolean enabled;
@@ -82,9 +83,12 @@ public class QualityAutoDisableService {
     @Value("${llm.cascade.quality.auto-disable.min-calls:50}")
     private int minCalls;
 
-    public QualityAutoDisableService(AiModelConfigRepository modelRepo, QualityCalculator quality) {
+    public QualityAutoDisableService(AiModelConfigRepository modelRepo,
+                                     QualityCalculator quality,
+                                     QualityAutoDisableNotifier notifier) {
         this.modelRepo = modelRepo;
         this.quality = quality;
+        this.notifier = notifier;
     }
 
     /**
@@ -157,12 +161,27 @@ public class QualityAutoDisableService {
                 + ", calls=" + q.callsLast30d() + ")");
         }
 
+        // v0.7.4: optionale Webhook-Notification. Feuert nur wenn wirklich
+        // was gekillt wurde (disabled non-empty) UND ein Webhook konfiguriert
+        // ist. Failure ist non-blocking — der Report wird trotzdem
+        // zurückgegeben, die Notification ist „best-effort".
+        if (!disabled.isEmpty()) {
+            try {
+                notifier.notifyDisabled(disabled, all.size());
+            } catch (Exception ignore) {
+                // Defensive: schon der Notifier selbst fängt alles, das hier
+                // ist nur die Belt-and-Suspenders-Garantie damit ein
+                // Bean-Init-Edge-Case nie den Auto-Disable-Lauf bricht.
+            }
+        }
+
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("checked", all.size());
         report.put("disabled", disabled);
         report.put("skippedAlreadyDisabled", skippedAlreadyDisabled);
         report.put("skippedNotKill", skippedNotKill);
         report.put("skippedTooFewCalls", skippedTooFewCalls);
+        report.put("notificationSent", !disabled.isEmpty() && notifier.isConfigured());
         return report;
     }
 
