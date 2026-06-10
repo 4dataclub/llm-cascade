@@ -115,6 +115,20 @@ public class AiModelConfig {
     private String providerBaseUrl;
 
     /**
+     * v0.7.1 — Referenz auf einen benannten {@link ProviderServer}.
+     *
+     * <p>Modell-Calls gehen an die {@code baseUrl} des referenzierten Servers.
+     * Wenn null: Fallback auf den Default-Server (z.B. „localhost").
+     *
+     * <p>Wenn beide gesetzt sind ({@link #providerBaseUrl} UND
+     * {@code providerServerName}), gewinnt {@code providerServerName} —
+     * also der referenzierte Server. {@code providerBaseUrl} bleibt als
+     * Legacy/Direct-URL-Option erhalten.
+     */
+    @Column(name = "provider_server_name", length = 50)
+    private String providerServerName;
+
+    /**
      * Wird vom System gesetzt wenn der Provider einen permanenten Fehler liefert
      * (z.B. HTTP 404 "model not found"). Der Admin sieht das im UI, kann manuell
      * re-enablen (setzt autoDisabled zurueck) oder den Eintrag loeschen.

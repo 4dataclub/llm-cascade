@@ -50,8 +50,10 @@ public class ApiController {
     @Autowired private LlmCascadeService cascade;
     @Autowired private AiModelConfigRepository modelRepo;
     @Autowired private CategoryMetaRepository categoryMetaRepo;
+    @Autowired private com.dataclub.llmcascade.repository.ProviderServerRepository providerServerRepo;
     @Autowired private com.dataclub.llmcascade.service.SemanticCategoryRouter router;
     @Autowired private com.dataclub.llmcascade.service.HardwareChecker hardwareChecker;
+    @Autowired private com.dataclub.llmcascade.service.QualityCalculator qualityCalculator;
     @Autowired private SettingsService settings;
     @Autowired private LlmCallLogRepository callLogRepo;
     @Autowired private LlmFailoverEventRepository failoverRepo;
@@ -148,11 +150,24 @@ public class ApiController {
             m.put("cooldownRemainingSec", cooldowns.getOrDefault(c.getProvider() + ":" + c.getModelId(), 0L));
             // v0.7.0 — providerBaseUrl (externer Inferenz-Server für lokale Modelle)
             m.put("providerBaseUrl", c.getProviderBaseUrl());
+            // v0.7.1 — providerServerName (referenziert benannten ProviderServer)
+            m.put("providerServerName", c.getProviderServerName());
             // v0.7.0 — Hardware-Check Status (Frontend rendert rotes Badge bei false)
+            String effectiveUrl = resolveEffectiveBaseUrl(c);
             com.dataclub.llmcascade.service.HardwareChecker.CompatibilityResult hwc = hardwareChecker.check(
-                c.getProvider(), c.getModelId(), c.getProviderBaseUrl());
+                c.getProvider(), c.getModelId(), effectiveUrl);
             m.put("hardwareCompatible", hwc.compatible());
             m.put("hardwareReason", hwc.reason());
+            // v0.7.1 — Quality-Score basierend auf llm_call_log der letzten 30 Tage
+            com.dataclub.llmcascade.service.QualityCalculator.QualityInfo q =
+                qualityCalculator.getQuality(c.getProvider(), c.getModelId());
+            Map<String, Object> quality = new LinkedHashMap<>();
+            quality.put("score", q.score());
+            quality.put("tier", q.tier());
+            quality.put("successRate", q.successRate());
+            quality.put("avgChars", q.avgChars());
+            quality.put("callsLast30d", q.callsLast30d());
+            m.put("quality", quality);
             out.add(m);
         }
         return out;
@@ -594,5 +609,103 @@ public class ApiController {
      */
     private static boolean isProviderKeyless(String provider) {
         return "ollama".equalsIgnoreCase(provider);
+    }
+
+    /**
+     * v0.7.1 — Resolved die effektive Base-URL für ein Modell:
+     *  1. AiModelConfig.providerServerName → ProviderServer.baseUrl
+     *  2. AiModelConfig.providerBaseUrl direkt
+     *  3. Default-ProviderServer falls vorhanden
+     *  4. null (= LlmProvider-Bean nutzt seinen eigenen Default)
+     */
+    private String resolveEffectiveBaseUrl(com.dataclub.llmcascade.model.AiModelConfig c) {
+        if (c.getProviderServerName() != null && !c.getProviderServerName().isBlank()) {
+            return providerServerRepo.findById(c.getProviderServerName())
+                .map(com.dataclub.llmcascade.model.ProviderServer::getBaseUrl)
+                .orElse(null);
+        }
+        if (c.getProviderBaseUrl() != null && !c.getProviderBaseUrl().isBlank()) {
+            return c.getProviderBaseUrl();
+        }
+        return providerServerRepo.findFirstByIsDefaultTrue()
+            .map(com.dataclub.llmcascade.model.ProviderServer::getBaseUrl)
+            .orElse(null);
+    }
+
+    // ─── Provider-Server CRUD (v0.7.1) ───────────────────────────────────────
+
+    /** Liste aller Provider-Server. */
+    @GetMapping("/provider-servers")
+    public List<Map<String, Object>> providerServersList() {
+        return providerServerRepo.findAll().stream()
+            .map(s -> {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("name", s.getName());
+                m.put("baseUrl", s.getBaseUrl());
+                m.put("isDefault", s.getIsDefault());
+                m.put("description", s.getDescription());
+                return m;
+            })
+            .toList();
+    }
+
+    /** Upsert eines Provider-Servers. */
+    @PutMapping("/provider-servers/{name}")
+    public ResponseEntity<?> providerServerUpsert(@PathVariable String name,
+                                                  @RequestBody Map<String, Object> body) {
+        String normalized = normalizeCategory(name);
+        if (!normalized.equals(name == null ? null : name.trim().toLowerCase())) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "ok", false,
+                "error", "name muss dem Format [a-z0-9_-]{1,50} entsprechen"
+            ));
+        }
+        com.dataclub.llmcascade.model.ProviderServer ps = providerServerRepo.findById(normalized)
+            .orElseGet(() -> com.dataclub.llmcascade.model.ProviderServer.builder()
+                .name(normalized).isDefault(Boolean.FALSE).build());
+        if (body.containsKey("baseUrl")) {
+            Object v = body.get("baseUrl");
+            if (v == null || v.toString().isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("ok", false, "error", "baseUrl darf nicht leer sein"));
+            }
+            ps.setBaseUrl(v.toString().trim());
+        }
+        if (body.containsKey("description")) {
+            Object v = body.get("description");
+            ps.setDescription(v == null ? null : v.toString().trim());
+        }
+        if (body.containsKey("isDefault")) {
+            boolean newDefault = Boolean.TRUE.equals(body.get("isDefault"));
+            if (newDefault) {
+                // Andere Default-Flags entfernen — nur 1 Default erlaubt
+                providerServerRepo.findFirstByIsDefaultTrue().ifPresent(other -> {
+                    if (!other.getName().equals(normalized)) {
+                        other.setIsDefault(false);
+                        providerServerRepo.save(other);
+                    }
+                });
+            }
+            ps.setIsDefault(newDefault);
+        }
+        if (ps.getBaseUrl() == null || ps.getBaseUrl().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("ok", false, "error", "baseUrl ist Pflicht"));
+        }
+        providerServerRepo.save(ps);
+        return ResponseEntity.ok(Map.of("ok", true));
+    }
+
+    /** Löscht einen Provider-Server. Default kann nicht gelöscht werden. */
+    @DeleteMapping("/provider-servers/{name}")
+    public ResponseEntity<?> providerServerDelete(@PathVariable String name) {
+        com.dataclub.llmcascade.model.ProviderServer ps = providerServerRepo.findById(name).orElse(null);
+        if (ps == null) return ResponseEntity.notFound().build();
+        if (Boolean.TRUE.equals(ps.getIsDefault())) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "ok", false,
+                "error", "Default-Server kann nicht geloescht werden. Setze zuerst einen anderen als Default."
+            ));
+        }
+        providerServerRepo.deleteById(name);
+        return ResponseEntity.ok(Map.of("ok", true));
     }
 }
