@@ -70,15 +70,16 @@ public class EscalationService {
 
         // 2. Initial-Tier wählen
         int initialTierIdx = chooseInitialTierIdx(tiers, opts);
-        int maxTier = opts.maxTier() != null ? opts.maxTier() : Integer.MAX_VALUE;
+        Integer maxTierLimit = opts.maxTier();
 
         // 3. Tier-Loop
         String lastReason = null;
         int escalationCount = 0;
         for (int i = initialTierIdx; i < tiers.size(); i++) {
-            // Hard-Limit: über maxTier nicht hinaus
-            if (i > initialTierIdx + maxTier) {
-                throw new RuntimeException("Tier-Limit erreicht (maxTier=" + maxTier
+            // Hard-Limit: User-Override für maximal erlaubte Escalations
+            // (Switcher-Use-Case: maxTier=0 → bleibt im Initial-Tier, kein Cloud)
+            if (maxTierLimit != null && (i - initialTierIdx) > maxTierLimit) {
+                throw new RuntimeException("Tier-Limit erreicht (maxTier=" + maxTierLimit
                     + "). Letzte Validator-Begründung: " + lastReason);
             }
 
