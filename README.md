@@ -341,6 +341,116 @@ Lokale Modelle hängen an Server-Hardware:
 **Konsequenz:** Auf CPU-Only-Servern stehen in Tier 0 nur 3-4B-Modelle.
 Tier 1+ MUSS Cloud sein. Für „echtes lokal-only" → 16+ GB VRAM-Hardware.
 
+## Hardware-Safety — Server darf nicht lahmgelegt werden
+
+**Kritische Anforderung:** Ein Modell darf nicht aktivierbar/nutzbar sein,
+wenn die Server-Hardware nicht ausreicht. Sonst kann ein zu großes
+Ollama-Modell beim Laden den Server in OOM-Crash zwingen.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  Preflight-Check vor Modell-Aktivierung (v0.7.0 — geplant)           │
+│                                                                       │
+│  POST /api/models   { provider:"ollama",                             │
+│                       modelId:"qwen3-coder:30b", enabled:true }      │
+│       ↓                                                               │
+│  HardwareChecker.validate(provider, modelId):                        │
+│     1. provider != "ollama" → OK (Cloud, kein lokales Resource-Lock) │
+│     2. provider == "ollama":                                         │
+│        a) Ollama API: GET /api/show?name=qwen3-coder:30b            │
+│           → modelSize: 18 GB                                          │
+│        b) System: /proc/meminfo + nvidia-smi                         │
+│           → freeRAM: 4.5 GB, freeVRAM: 0 GB                          │
+│        c) modelSize > 0.8 * (freeRAM + freeVRAM) → FAIL              │
+│        d) HTTP 422 mit Begründung                                    │
+│           { ok:false,                                                 │
+│             error:"Hardware unzureichend",                           │
+│             details:"18 GB nötig, 4.5 GB frei" }                    │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Abgefangen:** zu großes Ollama-Modell auf CPU-only-Server, GPU-Modell
+ohne GPU vorhanden. Sicherheitspuffer 20% (`modelSize > 0.8 * available`).
+
+**Nicht geprüft:** Cloud-Provider (laufen nicht lokal), Disk-Space (Ollama
+handelt das selbst).
+
+**Konfigurierbar:**
+```
+hardware.check.enabled=true
+hardware.check.ram-safety-factor=0.8
+hardware.check.allow-cpu-fallback=true
+```
+
+## Manueller Override (Switcher-Use-Case)
+
+EduPro vertraut Auto-Escalation, Switcher will manuelle Kontrolle. Caller
+kann `maxTier` setzen — Hard-Limit für Escalation:
+
+```json
+POST /api/generate
+{
+  "purpose": "...",
+  "escalate": true,
+  "maxTier": 0       ← Escalate NUR bis Tier 0. Bei Validator-Fail:
+}                       HTTP 503 statt Cloud-Switching.
+```
+
+**Konsumenten-Unterschied:**
+
+| App | Default | UI-Toggle? |
+|---|---|---|
+| **EduPro** | `auto` (kein maxTier) — System entscheidet | nein, transparent |
+| **Switcher** | `manual` (maxTier=N) — User wählt | ja, prominent |
+
+## Stats-Tracking — wie verfolge ich Routing-Entscheidungen?
+
+**Datenbank-Erweiterung (v0.7.0):** `llm_call_log` bekommt 6 neue Felder.
+
+| Feld | Typ | Zweck |
+|---|---|---|
+| `routedVia` | ENUM | `'category'` \| `'purpose'` \| `'escalate'` |
+| `requestedTier` | INT | Was der Caller wollte (orderIdx) |
+| `chosenTier` | INT | Was tatsächlich verwendet wurde |
+| `escalationCount` | INT | Wie oft eskaliert (0 = direkt OK) |
+| `purposeHash` | VARCHAR | Cache-Key für Semantic Routing |
+| `validatorPassed` | BOOLEAN | JSON+Schema+Quality ok? |
+| `validatorReason` | VARCHAR | Wenn fail, warum |
+
+**Drei neue Charts im Stats-Tab:**
+
+```
+📊 Tier-Verteilung (Lokal-Quote)
+   Tier 0:  ████████████████░░░  73%   ← gut: lokal-first funktioniert
+   Tier 1:  ███████░░░░░░░░░░░  21%
+   Tier 2:  ██░░░░░░░░░░░░░░░░   6%
+
+📊 Routing-Methode
+   category (legacy):    18%
+   purpose (Semantic):   62%
+   escalate (Auto):      20%
+
+📊 Escalation-Rate
+   Direkt OK:        89%   ← Validator passed bei erster Wahl
+   1× eskaliert:      9%
+   Alle exhausted:  0.2%   ← critical
+```
+
+**Use für Konzept-Validierung:**
+- Tier-0-Quote > 70% bedeutet: lokal-first funktioniert
+- Wenn Tier 2 > 30%: descriptions oder orderIdx prüfen
+- Drill-down via `service`-Tag zeigt welcher Caller am meisten eskaliert
+
+**SQL-Beispiel:**
+```sql
+SELECT service, COUNT(*) AS total,
+       ROUND(100.0 * SUM(CASE WHEN chosenTier=0 THEN 1 ELSE 0 END) / COUNT(*), 1) AS local_pct
+FROM llm_call_log
+WHERE calledAt > NOW() - INTERVAL '24 hours' AND routedVia='escalate'
+GROUP BY service
+ORDER BY total DESC;
+```
+
 ## Datenbank
 
 llm-cascade legt diese Tabellen in der per `SPRING_DATASOURCE_URL` angegebenen
