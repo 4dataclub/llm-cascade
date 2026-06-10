@@ -13,10 +13,20 @@ package com.dataclub.llmcascade.service;
  *                      Default true.
  * @param fixedModel    Nur fuer {@link Mode#FIXED}: erzwingt dieses Modell.
  *                      Format {@code "provider:modelId"} oder nur {@code "modelId"}.
- * @param category      Routing-Kategorie ({@code "utility"} | {@code "content"} | null).
+ * @param category      Routing-Kategorie (freier Identifier {@code [a-z0-9_-]{1,50}}, oder null).
  *                      null = kein Filter (Backward-Compat). Bei gesetzter Kategorie
  *                      werden zusaetzlich {@code "general"}-Modelle einbezogen, damit
  *                      bestehende Eintraege ohne explizite Kategorie weiter funktionieren.
+ * @param purpose       Optionaler Task-Beschreibungs-String fuer Semantic Routing
+ *                      (Phase v0.6.0). Wenn gesetzt UND {@code category} null ist,
+ *                      laesst llm-cascade einen Routing-LLM-Call entscheiden welche
+ *                      der im {@code category_meta}-Tabelle gepflegten Kategorien
+ *                      am besten passt. Resultat wird gecached (in-mem LRU, 24h TTL,
+ *                      key = SHA-256 des trimmed lowercase purpose). Bei explizitem
+ *                      {@code category}-Override oder gar keinem purpose: kein Routing.
+ *                      Beispiel: {@code "translate German i18n keys to English"}
+ *                      koennte z.B. {@code "utility"} ergeben (wenn dort "Audits,
+ *                      Uebersetzungen" als description gepflegt ist).
  */
 public record GenerateOptions(
     String service,
@@ -24,7 +34,8 @@ public record GenerateOptions(
     Mode mode,
     boolean cooldown,
     String fixedModel,
-    String category
+    String category,
+    String purpose
 ) {
     public enum Mode {
         /** Sticky activeIdx, Failover bei 429/503, Cooldown-State persistent. */
@@ -36,12 +47,18 @@ public record GenerateOptions(
     }
 
     public static GenerateOptions defaults() {
-        return new GenerateOptions(null, null, Mode.CASCADE, true, null, null);
+        return new GenerateOptions(null, null, Mode.CASCADE, true, null, null, null);
     }
 
-    /** Convenience-Konstruktor ohne category fuer aelteren Code (Kompatibilitaet). */
+    /** Backward-Compat-Konstruktor ohne purpose (vor v0.6.0). */
+    public GenerateOptions(String service, String lang, Mode mode, boolean cooldown,
+                           String fixedModel, String category) {
+        this(service, lang, mode, cooldown, fixedModel, category, null);
+    }
+
+    /** Convenience-Konstruktor ohne category + purpose (Backward-Compat zu vor v0.3). */
     public GenerateOptions(String service, String lang, Mode mode, boolean cooldown, String fixedModel) {
-        this(service, lang, mode, cooldown, fixedModel, null);
+        this(service, lang, mode, cooldown, fixedModel, null, null);
     }
 
     public static Mode parseMode(String s) {
