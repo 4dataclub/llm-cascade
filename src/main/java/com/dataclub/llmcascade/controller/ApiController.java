@@ -54,6 +54,7 @@ public class ApiController {
     @Autowired private com.dataclub.llmcascade.service.SemanticCategoryRouter router;
     @Autowired private com.dataclub.llmcascade.service.HardwareChecker hardwareChecker;
     @Autowired private com.dataclub.llmcascade.service.QualityCalculator qualityCalculator;
+    @Autowired private com.dataclub.llmcascade.service.QualityAutoDisableService qualityAutoDisable;
     @Autowired private SettingsService settings;
     @Autowired private LlmCallLogRepository callLogRepo;
     @Autowired private LlmFailoverEventRepository failoverRepo;
@@ -634,6 +635,47 @@ public class ApiController {
         };
         rows.sort(cmp);
         return rows;
+    }
+
+    // ─── Quality Auto-Disable Manual Trigger (v0.7.3) ──────────────────────
+
+    /**
+     * Manueller Trigger für den Quality-Auto-Disable-Job. Normalerweise
+     * läuft der Job alle 6h automatisch ({@link com.dataclub.llmcascade.service.QualityAutoDisableService#scheduledTick}),
+     * aber Admin kann ihn jederzeit per UI-Button anstoßen.
+     *
+     * <p>Liefert einen Report mit:
+     * <ul>
+     *   <li>{@code checked}: wieviele Modelle insgesamt geprüft</li>
+     *   <li>{@code disabled}: Liste der jetzt-auto-disabled Modelle mit Score+Calls</li>
+     *   <li>{@code skippedAlreadyDisabled}: Modelle die schon disabled waren</li>
+     *   <li>{@code skippedNotKill}: Modelle deren Tier nicht kill ist</li>
+     *   <li>{@code skippedTooFewCalls}: Modelle unter dem {@code min-calls}-Schwellwert</li>
+     * </ul>
+     *
+     * <p>Idempotent: Modelle die schon auto-disabled sind werden nicht
+     * doppelt angefasst.
+     */
+    @org.springframework.web.bind.annotation.PostMapping("/quality/run-auto-disable")
+    public Map<String, Object> runQualityAutoDisable() {
+        return qualityAutoDisable.runOnce();
+    }
+
+    /**
+     * Status-Endpoint: zeigt ob der Auto-Disable-Job aktiv ist und mit welchen
+     * Schwellwerten. Lesbar in UI um zu erklären warum/warum-nicht der Job
+     * läuft.
+     */
+    @GetMapping("/quality/auto-disable-config")
+    public Map<String, Object> qualityAutoDisableConfig() {
+        return Map.of(
+            "enabled", qualityAutoDisable.isEnabled(),
+            "minCalls", qualityAutoDisable.getMinCalls(),
+            "note", qualityAutoDisable.isEnabled()
+                ? "Job läuft alle 6h automatisch. Modelle mit Tier=kill und >= "
+                  + qualityAutoDisable.getMinCalls() + " Calls/30d werden auto-disabled."
+                : "Job ist via LLM_CASCADE_QUALITY_AUTODISABLE_ENABLED=false deaktiviert."
+        );
     }
 
     private static String mask(String s) {
