@@ -574,6 +574,68 @@ public class ApiController {
         return result;
     }
 
+    /**
+     * v0.7.2 — Quality-Stats pro Modell, default sortiert nach Score ASC
+     * (schlechte zuerst — Admin will Probleme sehen, nicht die laufenden Top-Modelle).
+     *
+     * <p>Parameter {@code sortBy}:
+     * <ul>
+     *   <li>{@code worst-first} (Default) — Score ASC, KILL-Kandidaten oben</li>
+     *   <li>{@code best-first} — Score DESC, fuer Routing-Inspiration</li>
+     *   <li>{@code calls-desc} — meist genutzte Modelle zuerst</li>
+     * </ul>
+     */
+    @GetMapping("/stats/quality")
+    public List<Map<String, Object>> statsQuality(
+            @RequestParam(name = "sortBy", required = false, defaultValue = "worst-first") String sortBy) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (AiModelConfig c : modelRepo.findAll()) {
+            com.dataclub.llmcascade.service.QualityCalculator.QualityInfo q =
+                qualityCalculator.getQuality(c.getProvider(), c.getModelId());
+            // Modelle die noch nie aufgerufen wurden überspringen — Score ist
+            // dann "unknown" mit 0.5, das verwirrt im Stats-View
+            if ("unknown".equals(q.tier()) && q.callsLast30d() == 0) continue;
+
+            Map<String, Object> r = new LinkedHashMap<>();
+            r.put("id", c.getId());
+            r.put("provider", c.getProvider());
+            r.put("modelId", c.getModelId());
+            r.put("displayName", c.getDisplayName());
+            r.put("category", c.getCategory());
+            r.put("enabled", c.getEnabled());
+            r.put("score", q.score());
+            r.put("tier", q.tier());        // top|ok|weak|kill
+            r.put("successRate", q.successRate());
+            r.put("avgChars", q.avgChars());
+            r.put("callsLast30d", q.callsLast30d());
+            // KILL-Indikator macht UX-Highlighting trivial im Frontend
+            r.put("kill", "kill".equals(q.tier()));
+            // Frei lesbares Tier-Label fuer das Frontend
+            r.put("tierIcon", switch (q.tier()) {
+                case "top" -> "★";
+                case "ok" -> "◐";
+                case "weak" -> "▽";
+                case "kill" -> "✗";
+                default -> "?";
+            });
+            rows.add(r);
+        }
+
+        // Sortierung
+        Comparator<Map<String, Object>> cmp = switch (sortBy) {
+            case "best-first" -> Comparator.comparingDouble(
+                m -> -((double) m.get("score")));
+            case "calls-desc" -> Comparator.comparingInt(
+                m -> -((int) m.get("callsLast30d")));
+            // default = worst-first: schlechte zuerst, dann nach Calls-DESC
+            default -> Comparator
+                .<Map<String, Object>>comparingDouble(m -> (double) m.get("score"))
+                .thenComparingInt(m -> -((int) m.get("callsLast30d")));
+        };
+        rows.sort(cmp);
+        return rows;
+    }
+
     private static String mask(String s) {
         if (s == null || s.length() <= 8) return s == null ? "" : "***";
         return s.substring(0, 4) + "..." + s.substring(s.length() - 4);
