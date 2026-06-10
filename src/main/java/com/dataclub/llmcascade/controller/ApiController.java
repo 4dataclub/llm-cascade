@@ -133,7 +133,12 @@ public class ApiController {
             m.put("autoDisabledReason", c.getAutoDisabledReason());
             m.put("autoDisabledAt", c.getAutoDisabledAt());
             String keyVal = settings.getString(c.getApiKeySettingKey());
-            m.put("keyConfigured", keyVal != null && !keyVal.isBlank());
+            // v0.6.1 — keyless Provider (z.B. ollama lokal). Bei diesen
+            // Modellen ist keyConfigured=true egal was im Settings steht,
+            // und das Frontend kann ein "Lokal"-Badge statt "Key fehlt" rendern.
+            boolean keyless = isProviderKeyless(c.getProvider());
+            m.put("keyless", keyless);
+            m.put("keyConfigured", keyless || (keyVal != null && !keyVal.isBlank()));
             m.put("cooldownRemainingSec", cooldowns.getOrDefault(c.getProvider() + ":" + c.getModelId(), 0L));
             out.add(m);
         }
@@ -548,5 +553,20 @@ public class ApiController {
         String cat = raw.toString().trim().toLowerCase();
         if (cat.isEmpty()) return "general";
         return CATEGORY_PATTERN.matcher(cat).matches() ? cat : "general";
+    }
+
+    /**
+     * v0.6.1 — true wenn der Provider lokal/keyless laeuft (Ollama).
+     * Diese Modelle bekommen im Frontend ein "Lokal"-Badge statt
+     * "Key fehlt", und der OpenAiCompatProvider laesst den Auth-Header
+     * weg (siehe {@link OpenAiCompatProvider#requiresApiKey()}).
+     *
+     * Anthropic NICHT hier hardcoded — das ist ein Konsumenten-spezifisches
+     * UX-Detail (Switcher via Max-OAuth braucht den Key nicht, EduPro
+     * Backend schon). Das wird im Frontend via {@code [keylessProviders]}-
+     * Input gemappt, nicht im Backend.
+     */
+    private static boolean isProviderKeyless(String provider) {
+        return "ollama".equalsIgnoreCase(provider);
     }
 }
