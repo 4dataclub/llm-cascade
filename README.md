@@ -177,6 +177,170 @@ GET  /api/stats/failover         -- Letzte Failover-Events
                        (klar, nicht 14h-hang)
 ```
 
+## Routing-Strategien — was der Caller wählt
+
+llm-cascade kennt **drei Routing-Mechanismen**, die sich beliebig kombinieren:
+
+### 1. Explizite Kategorie (klassisch, immer verfügbar)
+
+```json
+POST /api/generate
+{ "prompt": "...", "category": "content" }
+```
+
+Probiert nur Modelle mit `category=content` (plus `general` als Fallback).
+Klassisches Failover bei HTTP-Fehler innerhalb der Kategorie.
+
+### 2. Semantic Routing via `purpose` (seit v0.6.0)
+
+Statt eine hardcoded Kategorie zu wählen, beschreibt der Caller den Task
+in natürlicher Sprache:
+
+```json
+POST /api/generate
+{ "prompt": "...", "purpose": "übersetze deutsche i18n keys nach französisch" }
+```
+
+`SemanticCategoryRouter` macht einen Mini-LLM-Call mit den
+`category_meta.description`-Texten aller verfügbaren Kategorien und
+entscheidet welche passt. Resultat wird im In-Mem-LRU-Cache abgelegt
+(1000 Slots, 24h TTL, key = SHA-256 des trimmed-lowercase `purpose`).
+
+**Cache-Invalidation:** jeder `PUT/DELETE /api/categories/{name}` leert
+den Cache komplett — sonst würden stale Routing-Decisions auf alte
+Descriptions zeigen.
+
+**Endpoints:**
+- `GET    /api/routing/cache` — Snapshot + Stats
+- `DELETE /api/routing/cache` — komplett leeren
+- `DELETE /api/routing/cache/{purposeHash}` — einzelnen Eintrag
+- `POST   /api/routing/test` — Test-Preview ohne echten Generate-Call
+
+**Routing-Calls werden mit `service="__routing__"` im `llm_call_log`
+geloggt** — damit sie im Stats-Tab vom eigentlichen Payload-Call
+unterscheidbar sind.
+
+### 3. Auto-Escalation via `escalate` (v0.7.0 — geplant)
+
+```json
+POST /api/generate
+{
+  "prompt": "Generiere Mathe-Übung 7. Klasse",
+  "purpose": "Lehrcontent für Schulkinder",
+  "escalate": true,
+  "validatorSchema": { "type": "object", "required": ["frage","antwort"], ... }
+}
+```
+
+llm-cascade durchläuft die Kategorien sortiert nach `category_meta.orderIdx`
+(=Tier-Reihenfolge) und validiert nach jedem Call:
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│  [1] Semantic Router wählt Initial-Tier (purpose → category): │
+│      Read category_meta.description aller Kategorien          │
+│      → Antwort: „content" (weil description „Lehrcontent")    │
+│                                                                │
+│  [2] Versuche Initial-Tier:                                    │
+│      gemini-2.5-flash → Antwort                                │
+│      Validator-Pipeline:                                        │
+│        a) JSON.parse() ok?                                     │
+│        b) validatorSchema-Match? (org.everit:json-schema)      │
+│        c) Quality-Heuristik (Refusal-Phrasen, Min-Length)      │
+│      ✗ Schema-fail → ESCALATE                                  │
+│                                                                │
+│  [3] Auto-Escalation — nächstes Tier nach orderIdx:            │
+│      → Tier „dev" (orderIdx +1)                               │
+│      gemini-2.5-pro → Antwort                                  │
+│      Validator → ✓ pass → RETURN                              │
+└───────────────────────────────────────────────────────────────┘
+```
+
+**Failover ≠ Auto-Escalation:**
+
+| | Failover (heute) | Auto-Escalation (v0.7.0) |
+|---|---|---|
+| **Trigger** | HTTP-Fehler (429, 503, Timeout) | Validator-Fail (Schema, Quality) |
+| **Sprung** | Nächstes Modell, selbe Kategorie | Nächste Kategorie nach orderIdx |
+| **Kombiniert** | innerhalb Tier | Tier → Tier |
+
+Auto-Escalation kombiniert beide Mechanismen: zuerst Failover innerhalb
+Tier, dann Escalate auf nächsten Tier wenn alles fehlschlägt.
+
+## Kategorien als Tiers — die zentrale Architektur-Idee
+
+Die `category_meta.orderIdx` ist nicht nur „UI-Sortierung" — sie definiert
+**Eskalations-Tiers**. Lokale, billige Modelle stehen in Tier 0; Cloud-Premium
+in Tier N.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  Kategorien WERDEN zu Tiers                                          │
+│                                                                       │
+│  category    orderIdx   Modelle                  Tier-Charakter      │
+│  ────────    ────────   ───────────────────────  ─────────────────── │
+│  utility            0   ollama:llama3.2:3b       Tier 0: lokal,     │
+│                         ollama:gemma3:4b           simpel, gratis,   │
+│                                                    Daten bleiben     │
+│                                                    im Haus           │
+│                                                                       │
+│  content            1   gemini-2.5-flash         Tier 1: Cloud      │
+│                         gemini-2.5-flash-lite      mittel, billig,  │
+│                                                    Standard-Übungen │
+│                                                                       │
+│  dev                2   gemini-2.5-pro           Tier 2: Cloud      │
+│                         claude-opus-4-7            premium, komplex, │
+│                                                    Code-Reviews,     │
+│                                                    Final QA          │
+│                                                                       │
+│  general           99   (was übrig bleibt)       globaler Fallback  │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Was du als Admin im UI definierst** (alles ohne Code-Edit):
+- **Kategorien + descriptions** — Semantic Router weiß was wofür
+- **`orderIdx`** — Tier-Reihenfolge für Eskalation
+- **Modelle pro Kategorie** — was probiert wird
+
+→ User-controllable, ohne Neustart wirksam.
+
+## Dynamisches Routing pro Caller
+
+Jeder Caller liefert seinen eigenen `purpose`. Der Router entscheidet pro
+Call individuell — dieselbe Cascade-API, beliebig viele Caller, jeder
+bekommt seinen optimalen Routing-Pfad:
+
+```
+ExercisePoolService          purpose="Mathe-Übung 7. Klasse"           → content
+VocabularyI18nService        purpose="übersetze i18n keys nach FR"     → utility
+ExamGeneratorService         purpose="Prüfung schwierig + Erklärungen" → content/dev
+TesterAgent                  purpose="Test-Cases für UserService Java" → dev
+BackendAgent                 purpose="Spring Boot Endpoint generieren" → dev
+FrontendAgent                purpose="Angular Component User-Profil"   → dev
+ProjektleiterAgent           purpose="Sprint-Plan aus 12 PRs"          → content/dev
+ChatAgent (kindgerecht)      purpose="Schüler-Chat Photosynthese"      → content
+SwitcherClaude (lokal-first) purpose="schneller Refactor Java"         → free-only/local
+```
+
+Selbe Cascade-API, beliebig viele Caller, jeder bekommt seinen optimalen
+Routing-Pfad. Du als Admin definierst nur die Kategorien + descriptions.
+
+## Hardware-Realitäts-Check
+
+Lokale Modelle hängen an Server-Hardware:
+
+| Modell                | RAM-Bedarf | Status auf CPU-Only mit 8 GB RAM |
+|-----------------------|-----------:|----------------------------------|
+| `llama3.2:3b`         | ~2 GB      | ✓ stabil                         |
+| `gemma3:4b`           | ~3 GB      | ✓ stabil                         |
+| `qwen2.5:7b-instruct` | ~5 GB      | ✗ OOM-Crash beim Laden          |
+| `qwen3-coder:30b`     | ~18 GB     | ✗ braucht GPU mit 24 GB VRAM    |
+| `gemma4:24b`          | ~16 GB     | ✗ braucht GPU mit 16 GB VRAM    |
+| `llama3.1:70b`        | ~40 GB     | ✗ braucht GPU-Cluster           |
+
+**Konsequenz:** Auf CPU-Only-Servern stehen in Tier 0 nur 3-4B-Modelle.
+Tier 1+ MUSS Cloud sein. Für „echtes lokal-only" → 16+ GB VRAM-Hardware.
+
 ## Datenbank
 
 llm-cascade legt diese Tabellen in der per `SPRING_DATASOURCE_URL` angegebenen
