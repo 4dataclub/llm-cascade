@@ -52,6 +52,7 @@ public class LlmCascadeService {
     @Autowired private SettingsService settings;
     @Autowired private Map<String, LlmProvider> providers; // Spring liefert {beanName → impl}
     @Autowired private SemanticCategoryRouter router;
+    @Autowired @org.springframework.context.annotation.Lazy private EscalationService escalationService;
 
     @Autowired(required = false) private LlmCallLogRepository callLog;
     @Autowired(required = false) private LlmFailoverEventRepository failoverLog;
@@ -202,6 +203,15 @@ public class LlmCascadeService {
      */
     public GenerateResult generate(String prompt, GenerateOptions opts) {
         if (opts == null) opts = GenerateOptions.defaults();
+
+        // Phase v0.7.0 — Auto-Escalation: wenn escalate=true, lass den
+        // EscalationService die Tier-Reihenfolge durchlaufen + Validator pruefen.
+        if (opts.escalate()) {
+            EscalationService.EscalationResult er = escalationService.generateWithEscalation(prompt, opts);
+            // EscalationResult auf GenerateResult mappen (Caller bekommt das schon
+            // existierende Interface).
+            return new GenerateResult(er.text(), er.modelUsed());
+        }
 
         // Phase v0.6.0 — Semantic Routing: wenn category leer ist UND purpose
         // gegeben, laesst der Router via Mini-LLM-Call entscheiden welche

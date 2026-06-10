@@ -51,6 +51,7 @@ public class ApiController {
     @Autowired private AiModelConfigRepository modelRepo;
     @Autowired private CategoryMetaRepository categoryMetaRepo;
     @Autowired private com.dataclub.llmcascade.service.SemanticCategoryRouter router;
+    @Autowired private com.dataclub.llmcascade.service.HardwareChecker hardwareChecker;
     @Autowired private SettingsService settings;
     @Autowired private LlmCallLogRepository callLogRepo;
     @Autowired private LlmFailoverEventRepository failoverRepo;
@@ -95,7 +96,12 @@ public class ApiController {
         // v0.6.0 Semantic Routing — wenn category null + purpose gesetzt, laesst
         // LlmCascadeService den SemanticCategoryRouter entscheiden welche Kategorie passt.
         String purpose = body.get("purpose") instanceof String p && !p.isBlank() ? p : null;
-        GenerateOptions opts = new GenerateOptions(service, lang, mode, cooldown, fixedModel, category, purpose);
+        // v0.7.0 Auto-Escalation: durchlaeuft Tiers nach orderIdx mit Validator-Pipeline
+        boolean escalate = body.get("escalate") instanceof Boolean esc && esc;
+        String validatorSchema = body.get("validatorSchema") instanceof String vs && !vs.isBlank() ? vs : null;
+        Integer maxTier = body.get("maxTier") instanceof Number mt ? mt.intValue() : null;
+        GenerateOptions opts = new GenerateOptions(service, lang, mode, cooldown, fixedModel,
+            category, purpose, escalate, validatorSchema, maxTier);
 
         long start = System.currentTimeMillis();
         try {
@@ -140,17 +146,37 @@ public class ApiController {
             m.put("keyless", keyless);
             m.put("keyConfigured", keyless || (keyVal != null && !keyVal.isBlank()));
             m.put("cooldownRemainingSec", cooldowns.getOrDefault(c.getProvider() + ":" + c.getModelId(), 0L));
+            // v0.7.0 — providerBaseUrl (externer Inferenz-Server für lokale Modelle)
+            m.put("providerBaseUrl", c.getProviderBaseUrl());
+            // v0.7.0 — Hardware-Check Status (Frontend rendert rotes Badge bei false)
+            com.dataclub.llmcascade.service.HardwareChecker.CompatibilityResult hwc = hardwareChecker.check(
+                c.getProvider(), c.getModelId(), c.getProviderBaseUrl());
+            m.put("hardwareCompatible", hwc.compatible());
+            m.put("hardwareReason", hwc.reason());
             out.add(m);
         }
         return out;
     }
 
     @PostMapping("/models")
-    public Map<String, Object> modelCreate(@RequestBody AiModelConfig body) {
+    public ResponseEntity<?> modelCreate(@RequestBody AiModelConfig body) {
         if (body.getProvider() == null || body.getProvider().isBlank()
             || body.getModelId() == null || body.getModelId().isBlank()
             || body.getApiKeySettingKey() == null || body.getApiKeySettingKey().isBlank()) {
-            return Map.of("ok", false, "error", "provider, modelId und apiKeySettingKey sind Pflicht");
+            return ResponseEntity.badRequest().body(
+                Map.of("ok", false, "error", "provider, modelId und apiKeySettingKey sind Pflicht"));
+        }
+        // v0.7.0 — Hardware-Check vor Aktivierung (verhindert OOM bei zu grossen Ollama-Modellen)
+        if (Boolean.TRUE.equals(body.getEnabled())) {
+            com.dataclub.llmcascade.service.HardwareChecker.CompatibilityResult hwc = hardwareChecker.check(
+                body.getProvider(), body.getModelId(), body.getProviderBaseUrl());
+            if (!hwc.compatible()) {
+                return ResponseEntity.status(422).body(Map.of(
+                    "ok", false,
+                    "error", "Hardware unzureichend",
+                    "details", hwc.reason()
+                ));
+            }
         }
         Integer maxOrder = modelRepo.findAllByOrderByOrderIdxAsc().stream()
             .map(AiModelConfig::getOrderIdx)
@@ -160,7 +186,7 @@ public class ApiController {
         if (body.getAutoDisabled() == null) body.setAutoDisabled(Boolean.FALSE);
         body.setId(null);
         AiModelConfig saved = modelRepo.save(body);
-        return Map.of("ok", true, "id", saved.getId(), "orderIdx", saved.getOrderIdx());
+        return ResponseEntity.ok(Map.of("ok", true, "id", saved.getId(), "orderIdx", saved.getOrderIdx()));
     }
 
     @PutMapping("/models/{id}")

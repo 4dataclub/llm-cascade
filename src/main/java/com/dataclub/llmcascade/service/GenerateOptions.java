@@ -35,7 +35,10 @@ public record GenerateOptions(
     boolean cooldown,
     String fixedModel,
     String category,
-    String purpose
+    String purpose,
+    boolean escalate,
+    String validatorSchema,
+    Integer maxTier
 ) {
     public enum Mode {
         /** Sticky activeIdx, Failover bei 429/503, Cooldown-State persistent. */
@@ -47,18 +50,24 @@ public record GenerateOptions(
     }
 
     public static GenerateOptions defaults() {
-        return new GenerateOptions(null, null, Mode.CASCADE, true, null, null, null);
+        return new GenerateOptions(null, null, Mode.CASCADE, true, null, null, null, false, null, null);
+    }
+
+    /** Backward-Compat-Konstruktor ohne v0.7.0-Felder (vor Auto-Escalation). */
+    public GenerateOptions(String service, String lang, Mode mode, boolean cooldown,
+                           String fixedModel, String category, String purpose) {
+        this(service, lang, mode, cooldown, fixedModel, category, purpose, false, null, null);
     }
 
     /** Backward-Compat-Konstruktor ohne purpose (vor v0.6.0). */
     public GenerateOptions(String service, String lang, Mode mode, boolean cooldown,
                            String fixedModel, String category) {
-        this(service, lang, mode, cooldown, fixedModel, category, null);
+        this(service, lang, mode, cooldown, fixedModel, category, null, false, null, null);
     }
 
     /** Convenience-Konstruktor ohne category + purpose (Backward-Compat zu vor v0.3). */
     public GenerateOptions(String service, String lang, Mode mode, boolean cooldown, String fixedModel) {
-        this(service, lang, mode, cooldown, fixedModel, null, null);
+        this(service, lang, mode, cooldown, fixedModel, null, null, false, null, null);
     }
 
     public static Mode parseMode(String s) {

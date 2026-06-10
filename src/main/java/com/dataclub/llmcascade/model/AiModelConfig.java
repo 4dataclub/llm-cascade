@@ -96,6 +96,25 @@ public class AiModelConfig {
     private Integer cooldown503OverrideSec;
 
     /**
+     * v0.7.0 — Optionale Provider-URL fuer dieses spezifische Modell.
+     *
+     * Use-Cases:
+     *  - null/leer: Fallback auf provider-default (z.B. OLLAMA_BASE_URL env-var).
+     *    Klassisches Setup: Ollama-Container neben llm-cascade.
+     *  - "http://gpu-server.firma.local:11434/v1": externer Ollama-Server mit GPU
+     *    fuer schwere Modelle. llm-cascade laeuft auf der CPU-Maschine, schickt
+     *    aber alle Calls fuer dieses Modell an den GPU-Server.
+     *  - "https://api.together.ai/v1": hosted-inference-provider mit OpenAI-
+     *    Kompatibilitaet fuer 70B+ Modelle ohne eigene Hardware.
+     *
+     * Der HardwareChecker prueft gegen DIESE URL (nicht localhost) — also kann
+     * ein 70B-Modell auf einer GPU-Maschine eingerichtet werden, ohne dass der
+     * lokale RAM-Check fehlschlaegt.
+     */
+    @Column(name = "provider_base_url", length = 500)
+    private String providerBaseUrl;
+
+    /**
      * Wird vom System gesetzt wenn der Provider einen permanenten Fehler liefert
      * (z.B. HTTP 404 "model not found"). Der Admin sieht das im UI, kann manuell
      * re-enablen (setzt autoDisabled zurueck) oder den Eintrag loeschen.
