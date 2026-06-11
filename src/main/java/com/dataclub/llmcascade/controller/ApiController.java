@@ -96,6 +96,17 @@ public class ApiController {
         // mit passender category + "general" als Fallback (siehe AiModelConfigRepository).
         String category = body.get("category") instanceof String cat && !cat.isBlank()
             ? cat.toLowerCase() : null;
+        // v0.7.5: Globaler Override aus Settings. Wenn kein category im Body UND
+        // ein preferredCategory in den Settings gesetzt ist, gewinnt das Setting.
+        // So kann der User per UI-Toggle (Switcher „Cloud / Free")
+        // einen Pool festlegen ohne purpose-Strings angeben zu müssen.
+        // Body-`category` hat aber Vorrang — explicit > preference.
+        if (category == null) {
+            String pref = settings.getString(com.dataclub.llmcascade.service.SettingsService.PREFERRED_CATEGORY);
+            if (pref != null && !pref.isBlank()) {
+                category = pref.toLowerCase();
+            }
+        }
         // v0.6.0 Semantic Routing — wenn category null + purpose gesetzt, laesst
         // LlmCascadeService den SemanticCategoryRouter entscheiden welche Kategorie passt.
         String purpose = body.get("purpose") instanceof String p && !p.isBlank() ? p : null;
@@ -675,6 +686,45 @@ public class ApiController {
                 ? "Job läuft alle 6h automatisch. Modelle mit Tier=kill und >= "
                   + qualityAutoDisable.getMinCalls() + " Calls/30d werden auto-disabled."
                 : "Job ist via LLM_CASCADE_QUALITY_AUTODISABLE_ENABLED=false deaktiviert."
+        );
+    }
+
+    // ─── Preferred Category Override (v0.7.5) ───────────────────────────────
+
+    /**
+     * Liefert die aktuell gesetzte Override-Kategorie. Wenn empty/null:
+     * Semantic Routing entscheidet pro Call.
+     *
+     * Beispiel-Response: <code>{"category": "cloud"}</code> oder
+     * <code>{"category": ""}</code> wenn nichts überschrieben wird.
+     */
+    @GetMapping("/preferred-category")
+    public Map<String, Object> getPreferredCategory() {
+        String value = settings.getString(com.dataclub.llmcascade.service.SettingsService.PREFERRED_CATEGORY);
+        return Map.of(
+            "category", value == null ? "" : value,
+            "active", value != null && !value.isBlank(),
+            "note", value == null || value.isBlank()
+                ? "Semantic Routing aktiv — Cascade entscheidet pro Call basierend auf purpose."
+                : "Override aktiv — alle Generate-Calls ohne explizite category gehen an '" + value + "'."
+        );
+    }
+
+    /**
+     * Setzt die Override-Kategorie. Body: {@code {"category": "cloud"}} oder
+     * {@code {"category": ""}} um zurück zu Semantic Routing zu wechseln.
+     *
+     * Akzeptiert jeden non-empty String — keine Whitelist, weil Kategorien
+     * dynamisch in der DB leben (siehe CategoryMeta / generic categories).
+     */
+    @PostMapping("/preferred-category")
+    public Map<String, Object> setPreferredCategory(@RequestBody Map<String, Object> body) {
+        String value = body == null || !(body.get("category") instanceof String s) ? "" : s.trim();
+        settings.setString(com.dataclub.llmcascade.service.SettingsService.PREFERRED_CATEGORY, value);
+        return Map.of(
+            "ok", true,
+            "category", value,
+            "active", !value.isBlank()
         );
     }
 
