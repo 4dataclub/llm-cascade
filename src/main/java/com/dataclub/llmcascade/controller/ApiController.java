@@ -689,6 +689,117 @@ public class ApiController {
         );
     }
 
+    // ─── Performance + Cooldown (v0.7.6 — Library-Components) ────────────────
+
+    /**
+     * v0.7.6 — Performance-Stats pro Modell aus den letzten 30 Tagen.
+     * Konsumiert von Library-Component {@code <ki-models-performance>}.
+     *
+     * <p>Liefert pro (provider, model):
+     * <ul>
+     *   <li>{@code calls}: Gesamt-Calls</li>
+     *   <li>{@code success}: erfolgreiche Calls</li>
+     *   <li>{@code successRate}: 0.0 - 1.0</li>
+     *   <li>{@code avgChars}: Durchschnitt output_chars pro Call</li>
+     *   <li>{@code totalChars}: Summe output_chars</li>
+     * </ul>
+     *
+     * <p>Cost-Schaetzung wird NICHT serverseitig gerechnet — Konsumenten
+     * haben ihre eigenen Preis-Mappings (EduPro hat andere Preise als
+     * Switcher als zukuenftige Apps). Library-Component nimmt ein
+     * `[costMapping]`-Input fuer USD/1M-Output-Tokens pro Provider.
+     *
+     * <p>Default-Sortierung: calls DESC. Optional {@code ?sortBy=...}
+     * fuer client-side-Override (ToDo wenn gebraucht).
+     */
+    @GetMapping("/stats/performance")
+    public List<Map<String, Object>> statsPerformance(
+            @RequestParam(name = "sortBy", required = false, defaultValue = "calls-desc") String sortBy) {
+        java.time.LocalDateTime day30 = java.time.LocalDateTime.now().minusDays(30);
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Object[] r : callLogRepo.aggregateByProviderModelSince(day30)) {
+            String provider = String.valueOf(r[0]);
+            String model = String.valueOf(r[1]);
+            long calls = ((Number) r[2]).longValue();
+            long success = ((Number) r[3]).longValue();
+            long totalChars = ((Number) r[4]).longValue();
+            double avgChars = ((Number) r[5]).doubleValue();
+
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("provider", provider);
+            row.put("model", model);
+            row.put("calls", calls);
+            row.put("success", success);
+            row.put("successRate", calls > 0 ? Math.round((double) success / calls * 10000.0) / 10000.0 : 0.0);
+            row.put("totalChars", totalChars);
+            row.put("avgChars", Math.round(avgChars));
+            rows.add(row);
+        }
+
+        // Client-Side-Sortierung (Default = calls-desc steht schon durch SQL)
+        Comparator<Map<String, Object>> cmp = switch (sortBy) {
+            case "success-desc" -> Comparator.comparingDouble(
+                m -> -((double) m.get("successRate")));
+            case "chars-desc" -> Comparator.comparingLong(
+                m -> -((long) m.get("totalChars")));
+            case "calls-desc" -> Comparator.comparingLong(
+                m -> -((long) m.get("calls")));
+            default -> Comparator.comparingLong(
+                m -> -((long) m.get("calls")));
+        };
+        rows.sort(cmp);
+        return rows;
+    }
+
+    /**
+     * v0.7.6 — Cooldown-State pro Modell. Konsumiert von Library-Component
+     * {@code <ki-models-cooldown-state>}.
+     *
+     * <p>Liefert pro Modell aus {@code ai_model_config}:
+     * <ul>
+     *   <li>{@code provider}, {@code modelId}, {@code displayName}, {@code category}</li>
+     *   <li>{@code enabled}: User-Toggle</li>
+     *   <li>{@code autoDisabled}: System-Auto-Disable wegen API-Fehler oder Quality</li>
+     *   <li>{@code autoDisabledReason}: lesbarer Grund</li>
+     *   <li>{@code autoDisabledAt}: ISO-Timestamp</li>
+     *   <li>{@code cooldownRemainingSec}: Sekunden bis Recheck (aus
+     *       LlmCascadeService.getCooldownState())</li>
+     * </ul>
+     *
+     * Sortierung: Modelle mit cooldownRemainingSec &gt; 0 ODER autoDisabled
+     * stehen oben (Problem-Modelle zuerst), dann nach orderIdx ASC.
+     */
+    @GetMapping("/cooldown-state")
+    public List<Map<String, Object>> cooldownState() {
+        Map<String, Long> cooldowns = cascade.getCooldownState();
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (AiModelConfig c : modelRepo.findAllByOrderByOrderIdxAsc()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", c.getId());
+            row.put("provider", c.getProvider());
+            row.put("modelId", c.getModelId());
+            row.put("displayName", c.getDisplayName());
+            row.put("category", c.getCategory());
+            row.put("enabled", c.getEnabled());
+            row.put("autoDisabled", c.getAutoDisabled());
+            row.put("autoDisabledReason", c.getAutoDisabledReason());
+            row.put("autoDisabledAt", c.getAutoDisabledAt() != null ? c.getAutoDisabledAt().toString() : null);
+            long cooldown = cooldowns.getOrDefault(c.getProvider() + ":" + c.getModelId(), 0L);
+            row.put("cooldownRemainingSec", cooldown);
+            rows.add(row);
+        }
+
+        // Problem-Modelle zuerst: autoDisabled ODER cooldown > 0, dann Rest
+        // in orderIdx-Reihenfolge (= already sorted from findAllByOrderByOrderIdxAsc)
+        rows.sort((a, b) -> {
+            boolean aProblem = Boolean.TRUE.equals(a.get("autoDisabled")) || ((long) a.get("cooldownRemainingSec")) > 0;
+            boolean bProblem = Boolean.TRUE.equals(b.get("autoDisabled")) || ((long) b.get("cooldownRemainingSec")) > 0;
+            if (aProblem == bProblem) return 0; // bleibt orderIdx-stabil
+            return aProblem ? -1 : 1;
+        });
+        return rows;
+    }
+
     // ─── Preferred Category Override (v0.7.5) ───────────────────────────────
 
     /**
