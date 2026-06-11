@@ -19,11 +19,25 @@ public class SettingsService {
     public static final String LIVE_SESSIONS_ENABLED = "liveSessionsEnabled";
     public static final String STATISTICS_ENABLED   = "statisticsEnabled";
 
+    /**
+     * v0.7.5 — Globaler Override für die Cascade-Kategorie, bypassed den
+     * Semantic Router. Wenn gesetzt (non-empty) → jeder generate-Call ohne
+     * explizite `preferredCategory` im Body wird auf diese Kategorie geroutet.
+     * Wenn leer/null → normales Semantic-Routing.
+     *
+     * UI-Use-Case (Switcher): User toggelt im Modus-Panel zwischen
+     * „Cloud-Premium" und „Free Only", um zu kontrollieren welcher
+     * Modell-Pool gerade aktiv ist — ohne sich Gedanken über purpose-Strings
+     * machen zu müssen.
+     */
+    public static final String PREFERRED_CATEGORY    = "preferredCategory";
+
     /** Default-Werte falls noch nichts gesetzt wurde. Hier ALLE neuen Module
      *  eintragen, damit ein frischer DB-Start sofort sinnvolle Defaults hat. */
     private static final Map<String, String> DEFAULTS = Map.of(
         LIVE_SESSIONS_ENABLED, "false",
-        STATISTICS_ENABLED,    "true"
+        STATISTICS_ENABLED,    "true",
+        PREFERRED_CATEGORY,    ""   // leer = Semantic Routing aktiv
     );
 
     @Autowired private AppSettingRepository repo;
