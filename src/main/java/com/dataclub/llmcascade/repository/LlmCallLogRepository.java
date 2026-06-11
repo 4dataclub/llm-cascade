@@ -57,4 +57,32 @@ public interface LlmCallLogRepository extends JpaRepository<LlmCallLog, Long> {
         "WHERE called_at > :since GROUP BY service ORDER BY SUM(output_chars) DESC",
         nativeQuery = true)
     List<Object[]> aggregateCostByServiceSince(@Param("since") LocalDateTime since);
+
+    /**
+     * v0.7.6 — Performance-Aggregation pro (provider, model). Quelle fuer
+     * den /api/stats/performance Endpoint + die Library-Component
+     * {@code <ki-models-performance>}.
+     *
+     * Liefert pro Zeile:
+     * <ol>
+     *   <li>provider</li>
+     *   <li>model</li>
+     *   <li>calls (Gesamt-Anzahl)</li>
+     *   <li>success (Anzahl erfolgreicher)</li>
+     *   <li>total_chars (Summe output_chars)</li>
+     *   <li>avg_chars (Durchschnitt output_chars pro Call)</li>
+     * </ol>
+     *
+     * Sortierung: calls DESC. Konsumenten koennen client-side weiter sortieren.
+     */
+    @Query(value =
+        "SELECT COALESCE(provider, '?') AS provider, COALESCE(model, '?') AS model, " +
+        "       COUNT(*) AS calls, " +
+        "       SUM(CASE WHEN success THEN 1 ELSE 0 END) AS success, " +
+        "       COALESCE(SUM(output_chars), 0) AS total_chars, " +
+        "       COALESCE(AVG(output_chars), 0) AS avg_chars " +
+        "FROM llm_call_log WHERE called_at > :since " +
+        "GROUP BY provider, model ORDER BY calls DESC",
+        nativeQuery = true)
+    List<Object[]> aggregateByProviderModelSince(@Param("since") LocalDateTime since);
 }
