@@ -10,9 +10,12 @@ import org.springframework.context.annotation.Configuration;
  * Bean-Registrierung der OpenAI-kompatiblen Provider unter unterschiedlichen Namen.
  *
  * Eine Klasse ({@link OpenAiCompatProvider}), mehrere Bean-Namen, jeweils mit
- * anderem baseUrl-Konstruktor-Parameter. Plus ein generischer "openai_compat"-Bean
- * mit dem OpenRouter-Default (User kann das Modell mit eigenem baseUrl-Hinweis
- * im displayName dokumentieren -- echte per-Modell-baseUrl waere Phase 5).
+ * anderem baseUrl-Konstruktor-Parameter (= Default-baseUrl des Providers).
+ *
+ * v0.8.0: per-Modell-baseUrl ist umgesetzt — {@code ProviderServerResolver}
+ * löst pro Call die effektive Server-URL auf und übergibt sie an
+ * {@code generate(..., baseUrlOverride)}. Die hier registrierten baseUrls sind
+ * nur noch der Fallback wenn ein Modell keinen Server zugewiesen hat.
  *
  * Beans:
  *  "openai"         → api.openai.com/v1
@@ -63,7 +66,8 @@ public class LlmProviderConfig {
     @Bean(name = "openai_compat")
     public LlmProvider openaiCompatProvider() {
         // Catch-all: OpenRouter als Default, da am breitesten kompatibel.
-        // Spaeter: per-Modell-baseUrl via AiModelConfig.providerBaseUrl-Spalte.
+        // per-Modell-baseUrl seit v0.8.0 via ProviderServerResolver (Override
+        // wird an generate() durchgereicht) — dieser Wert ist nur der Fallback.
         return new OpenAiCompatProvider("https://openrouter.ai/api/v1");
     }
 }

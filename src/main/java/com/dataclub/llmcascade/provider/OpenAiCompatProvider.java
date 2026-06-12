@@ -62,15 +62,34 @@ public class OpenAiCompatProvider implements LlmProvider {
      */
     @Override
     public String generateSmoke(String modelId, String apiKey) {
-        return generateInternal("Reply with one word only: ok", modelId, apiKey, 20);
+        return generateInternal("Reply with one word only: ok", modelId, apiKey, 20, null);
+    }
+
+    @Override
+    public String generateSmoke(String modelId, String apiKey, String baseUrlOverride) {
+        return generateInternal("Reply with one word only: ok", modelId, apiKey, 20, baseUrlOverride);
     }
 
     @Override
     public String generate(String prompt, String modelId, String apiKey) {
-        return generateInternal(prompt, modelId, apiKey, null);
+        return generateInternal(prompt, modelId, apiKey, null, null);
     }
 
-    private String generateInternal(String prompt, String modelId, String apiKey, Integer maxTokens) {
+    @Override
+    public String generate(String prompt, String modelId, String apiKey, String baseUrlOverride) {
+        return generateInternal(prompt, modelId, apiKey, null, baseUrlOverride);
+    }
+
+    /**
+     * @param baseUrlOverride v0.8.0 — wenn non-blank, wird DIESE Base-URL statt
+     *        der Bean-Default-{@link #baseUrl} genutzt (externer Inferenz-Server
+     *        pro Modell). Trailing-Slash wird getrimmt.
+     */
+    private String generateInternal(String prompt, String modelId, String apiKey, Integer maxTokens,
+                                    String baseUrlOverride) {
+        String effBase = (baseUrlOverride != null && !baseUrlOverride.isBlank())
+            ? (baseUrlOverride.endsWith("/") ? baseUrlOverride.substring(0, baseUrlOverride.length() - 1) : baseUrlOverride)
+            : this.baseUrl;
         if (requiresApiKey && (apiKey == null || apiKey.isBlank())) {
             throw new LlmException(LlmException.Type.CLIENT_ERROR, 401, "API key is empty");
         }
@@ -97,7 +116,7 @@ public class OpenAiCompatProvider implements LlmProvider {
 
         ResponseEntity<Map> resp;
         try {
-            resp = restTemplate.postForEntity(baseUrl + "/chat/completions", req, Map.class);
+            resp = restTemplate.postForEntity(effBase + "/chat/completions", req, Map.class);
         } catch (HttpStatusCodeException ex) {
             throw mapHttpError(ex);
         }

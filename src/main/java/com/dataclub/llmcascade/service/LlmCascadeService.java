@@ -52,6 +52,9 @@ public class LlmCascadeService {
     @Autowired private SettingsService settings;
     @Autowired private Map<String, LlmProvider> providers; // Spring liefert {beanName → impl}
     @Autowired private SemanticCategoryRouter router;
+    // v0.8.0 — löst den effektiven Inferenz-Server pro Modell auf (externer Server
+    // statt localhost). null = Provider-Bean-Default.
+    @Autowired private ProviderServerResolver serverResolver;
     @Autowired @org.springframework.context.annotation.Lazy private EscalationService escalationService;
 
     @Autowired(required = false) private LlmCallLogRepository callLog;
@@ -275,9 +278,10 @@ public class LlmCascadeService {
                 System.err.println("[LLM] " + stateKey + " uebersprungen — Key '" + cfg.getApiKeySettingKey() + "' nicht gesetzt");
                 continue;
             }
+            String baseUrl = serverResolver.resolveEffectiveBaseUrl(cfg);
 
             try {
-                String result = provider.generate(prompt, cfg.getModelId(), apiKey);
+                String result = provider.generate(prompt, cfg.getModelId(), apiKey, baseUrl);
                 setActiveIdxFor(cascadeName, i);
                 log(true, result == null ? 0 : result.length(), cfg, opts);
                 return new GenerateResult(result, stateKey);
@@ -292,7 +296,7 @@ public class LlmCascadeService {
                         System.err.println("[LLM] " + stateKey + " TRANSIENT (warte " + delay + "ms, retry)");
                         sleep(delay);
                         try {
-                            String result = provider.generate(prompt, cfg.getModelId(), apiKey);
+                            String result = provider.generate(prompt, cfg.getModelId(), apiKey, baseUrl);
                             setActiveIdxFor(cascadeName, i);
                             log(true, result == null ? 0 : result.length(), cfg, opts);
                             return new GenerateResult(result, stateKey);
@@ -369,9 +373,10 @@ public class LlmCascadeService {
             if (provider == null) continue;
             String apiKey = resolveApiKeyForSetting(cfg.getApiKeySettingKey());
             if (apiKey == null || apiKey.isBlank()) continue;
+            String baseUrl = serverResolver.resolveEffectiveBaseUrl(cfg);
 
             try {
-                String result = provider.generate(prompt, cfg.getModelId(), apiKey);
+                String result = provider.generate(prompt, cfg.getModelId(), apiKey, baseUrl);
                 log(true, result == null ? 0 : result.length(), cfg, opts);
                 return new GenerateResult(result, stateKey);
             } catch (LlmException ex) {
@@ -416,8 +421,9 @@ public class LlmCascadeService {
         if (apiKey == null || apiKey.isBlank()) {
             throw new RuntimeException("mode=fixed: Key '" + cfg.getApiKeySettingKey() + "' nicht gesetzt");
         }
+        String baseUrl = serverResolver.resolveEffectiveBaseUrl(cfg);
         try {
-            String result = provider.generate(prompt, cfg.getModelId(), apiKey);
+            String result = provider.generate(prompt, cfg.getModelId(), apiKey, baseUrl);
             log(true, result == null ? 0 : result.length(), cfg, opts);
             return new GenerateResult(result, stateKey);
         } catch (LlmException ex) {
