@@ -382,6 +382,55 @@ hardware.check.ram-safety-factor=0.8
 hardware.check.allow-cpu-fallback=true
 ```
 
+## Inferenz-Server pro Modell — localhost oder extern (v0.8.0)
+
+**Das Problem in einfachen Worten:** Lokale Modelle (Ollama) laufen normalerweise
+auf demselben Rechner wie llm-cascade — „localhost". Wenn dieser Rechner aber zu
+schwach ist (kein GPU, wenig RAM), willst du ein Modell vielleicht auf einen
+**stärkeren externen Server** auslagern (z.B. eine GPU-Maschine im Büro), ohne
+alle anderen Modelle anzufassen. Cloud-Modelle (Gemini, OpenRouter…) sind davon
+nicht betroffen — die haben feste Adressen im Internet.
+
+**Wie es funktioniert:** Du legst benannte **Provider-Server** an (einer ist der
+Default „localhost"). Jedes Modell kann optional einen davon auswählen. Wählt es
+keinen, nimmt ein Ollama-Modell automatisch den Default-Server.
+
+```
+   Ein Modell soll antworten
+            │
+            ▼
+   Welcher Server ist gemeint?  (ProviderServerResolver)
+            │
+   ┌────────┴───────────────────────────────────────────────┐
+   │ 1. Modell hat einen Server-Namen?                       │
+   │       └─► dessen URL          z.B. http://gpu-box:11434/v1
+   │ 2. Modell hat eine direkte URL? (legacy)                │
+   │       └─► diese URL                                     │
+   │ 3. Ist es ein Ollama-Modell ohne Auswahl?               │
+   │       └─► Default-Server "localhost"  http://ollama:11434/v1
+   │ 4. Sonst (Cloud-Provider)                               │
+   │       └─► fester Provider-Default (Gemini/OpenRouter…)  │
+   └────────┬───────────────────────────────────────────────┘
+            ▼
+   generate(prompt, modelId, apiKey, effectiveBaseUrl)
+            ▼
+   POST {effectiveBaseUrl}/chat/completions
+```
+
+**Wichtig (vorher ein Bug):** Bis v0.7.x wurde dieser „effektive Server" zwar für
+den Hardware-Check berechnet, der echte Inferenz-Call lief aber trotzdem immer
+auf dem statischen localhost. Seit v0.8.0 trifft der Call wirklich den gewählten
+Server — sonst hätte das Hardware-Badge „extern entsperrt" gelogen.
+
+**API (CRUD für Server):**
+```
+GET    /api/provider-servers           Liste
+PUT    /api/provider-servers/{name}    anlegen/ändern  {baseUrl, isDefault?, description?}
+DELETE /api/provider-servers/{name}    löschen (Default nicht löschbar)
+```
+Der Default-Server „localhost" wird beim ersten Backend-Start automatisch
+angelegt (`DefaultProviderServerInit`).
+
 ## Manueller Override (Switcher-Use-Case)
 
 EduPro vertraut Auto-Escalation, Switcher will manuelle Kontrolle. Caller
@@ -546,6 +595,7 @@ curl -X POST http://localhost:8090/api/generate \
 ## Status
 
 - Provider: `gemini`, `openai`, `openrouter`, `deepseek`, `anthropic`, `openai_compat` (catch-all)
+- v0.8.0: Per-Modell **Inferenz-Server-Routing** — Ollama-Modell auf externen Server auslagern, Default bleibt localhost (`ProviderServerResolver`, siehe „Inferenz-Server pro Modell")
 - Cascade-Logik 1:1 aus EduPro extrahiert (`feedback_no_architecture_changes`-konform)
 - Auto-Disable bei `MODEL_INVALID` (HTTP 404) — Reason wird in DB persistiert
 - Setup-canonical: docker-compose.yml + DataInitializer (kein setup.sh nötig — Web-App-Pattern, siehe `feedback_setup_canonical`)

@@ -53,6 +53,7 @@ public class ApiController {
     @Autowired private com.dataclub.llmcascade.repository.ProviderServerRepository providerServerRepo;
     @Autowired private com.dataclub.llmcascade.service.SemanticCategoryRouter router;
     @Autowired private com.dataclub.llmcascade.service.HardwareChecker hardwareChecker;
+    @Autowired private com.dataclub.llmcascade.service.ProviderServerResolver serverResolver;
     @Autowired private com.dataclub.llmcascade.service.QualityCalculator qualityCalculator;
     @Autowired private com.dataclub.llmcascade.service.QualityAutoDisableService qualityAutoDisable;
     @Autowired private SettingsService settings;
@@ -165,7 +166,7 @@ public class ApiController {
             // v0.7.1 — providerServerName (referenziert benannten ProviderServer)
             m.put("providerServerName", c.getProviderServerName());
             // v0.7.0 — Hardware-Check Status (Frontend rendert rotes Badge bei false)
-            String effectiveUrl = resolveEffectiveBaseUrl(c);
+            String effectiveUrl = serverResolver.resolveEffectiveBaseUrl(c);
             com.dataclub.llmcascade.service.HardwareChecker.CompatibilityResult hwc = hardwareChecker.check(
                 c.getProvider(), c.getModelId(), effectiveUrl);
             m.put("hardwareCompatible", hwc.compatible());
@@ -286,10 +287,12 @@ public class ApiController {
             return Map.of("ok", false, "error", "Key '" + cfg.getApiKeySettingKey() + "' ist nicht gesetzt");
         }
         long start = System.currentTimeMillis();
+        // v0.8.0 — Test trifft denselben (ggf. externen) Server wie der echte Call.
+        String baseUrl = serverResolver.resolveEffectiveBaseUrl(cfg);
         try {
             // generateSmoke() sendet max_tokens=20 — wichtig fuer Ollama auf CPU
             // die sonst bei "ping" eine lange vollstaendige Antwort generiert (~2-5 min).
-            String out = provider.generateSmoke(cfg.getModelId(), apiKey);
+            String out = provider.generateSmoke(cfg.getModelId(), apiKey, baseUrl);
             return Map.of(
                 "ok", true,
                 "latencyMs", System.currentTimeMillis() - start,
@@ -876,26 +879,9 @@ public class ApiController {
         return "ollama".equalsIgnoreCase(provider);
     }
 
-    /**
-     * v0.7.1 — Resolved die effektive Base-URL für ein Modell:
-     *  1. AiModelConfig.providerServerName → ProviderServer.baseUrl
-     *  2. AiModelConfig.providerBaseUrl direkt
-     *  3. Default-ProviderServer falls vorhanden
-     *  4. null (= LlmProvider-Bean nutzt seinen eigenen Default)
-     */
-    private String resolveEffectiveBaseUrl(com.dataclub.llmcascade.model.AiModelConfig c) {
-        if (c.getProviderServerName() != null && !c.getProviderServerName().isBlank()) {
-            return providerServerRepo.findById(c.getProviderServerName())
-                .map(com.dataclub.llmcascade.model.ProviderServer::getBaseUrl)
-                .orElse(null);
-        }
-        if (c.getProviderBaseUrl() != null && !c.getProviderBaseUrl().isBlank()) {
-            return c.getProviderBaseUrl();
-        }
-        return providerServerRepo.findFirstByIsDefaultTrue()
-            .map(com.dataclub.llmcascade.model.ProviderServer::getBaseUrl)
-            .orElse(null);
-    }
+    // v0.8.0 — resolveEffectiveBaseUrl() lebt jetzt zentral in
+    // ProviderServerResolver (wird von Hardware-Check UND echtem Call-Path
+    // genutzt, damit ein zugewiesener externer Server auch wirklich getroffen wird).
 
     // ─── Provider-Server CRUD (v0.7.1) ───────────────────────────────────────
 

@@ -28,6 +28,19 @@ public interface LlmProvider {
     String generate(String prompt, String modelId, String apiKey);
 
     /**
+     * v0.8.0 — Variante mit per-Call Base-URL-Override (externer Inferenz-Server
+     * pro Modell). {@code baseUrlOverride != null} überschreibt die Bean-Default-
+     * baseUrl für genau diesen Aufruf.
+     *
+     * Default-Impl ignoriert den Override → Cloud-Provider mit festem Endpoint
+     * ({@code GeminiProvider}, {@code AnthropicProvider}) brauchen nichts zu tun.
+     * Nur {@link OpenAiCompatProvider} (Ollama / self-hosted) überschreibt das.
+     */
+    default String generate(String prompt, String modelId, String apiKey, String baseUrlOverride) {
+        return generate(prompt, modelId, apiKey);
+    }
+
+    /**
      * Smoke-Test-Variante: erzeugt eine minimale Antwort (max 20 Tokens).
      * Wichtig fuer lokale Modelle wie Ollama, die ohne Token-Limit auf CPU
      * mehrere Minuten benoetigen koennen.
@@ -37,5 +50,14 @@ public interface LlmProvider {
      */
     default String generateSmoke(String modelId, String apiKey) {
         return generate("Reply with one word only: ok", modelId, apiKey);
+    }
+
+    /**
+     * v0.8.0 — Smoke-Test mit per-Call Base-URL-Override (siehe
+     * {@link #generate(String, String, String, String)}). Default-Impl ignoriert
+     * den Override.
+     */
+    default String generateSmoke(String modelId, String apiKey, String baseUrlOverride) {
+        return generateSmoke(modelId, apiKey);
     }
 }
