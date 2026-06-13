@@ -54,6 +54,7 @@ public class ApiController {
     @Autowired private com.dataclub.llmcascade.service.SemanticCategoryRouter router;
     @Autowired private com.dataclub.llmcascade.service.HardwareChecker hardwareChecker;
     @Autowired private com.dataclub.llmcascade.service.ProviderServerResolver serverResolver;
+    @Autowired private com.dataclub.llmcascade.service.OllamaProvisioner provisioner;
     @Autowired private com.dataclub.llmcascade.service.QualityCalculator qualityCalculator;
     @Autowired private com.dataclub.llmcascade.service.QualityAutoDisableService qualityAutoDisable;
     @Autowired private SettingsService settings;
@@ -214,6 +215,7 @@ public class ApiController {
         if (body.getAutoDisabled() == null) body.setAutoDisabled(Boolean.FALSE);
         body.setId(null);
         AiModelConfig saved = modelRepo.save(body);
+        maybeProvision(saved);
         return ResponseEntity.ok(Map.of("ok", true, "id", saved.getId(), "orderIdx", saved.getOrderIdx()));
     }
 
@@ -242,8 +244,30 @@ public class ApiController {
             cfg.setAutoDisabledReason(null);
             cfg.setAutoDisabledAt(null);
         }
+        // v0.8.1 — Server-Zuweisung persistieren (wurde bisher verschluckt → die
+        // Server-Spalte im UI hatte keinen Effekt).
+        if (body.containsKey("providerServerName")) {
+            Object v = body.get("providerServerName");
+            cfg.setProviderServerName(v == null || v.toString().isBlank() ? null : v.toString());
+        }
+        if (body.containsKey("providerBaseUrl")) {
+            Object v = body.get("providerBaseUrl");
+            cfg.setProviderBaseUrl(v == null || v.toString().isBlank() ? null : v.toString());
+        }
         modelRepo.save(cfg);
+        maybeProvision(cfg);
         return ResponseEntity.ok(Map.of("ok", true));
+    }
+
+    /**
+     * v0.8.1 — Wird ein Ollama-Modell angelegt/geändert, das Modell auf dem
+     * effektiven Inferenz-Server (zugewiesen ODER Default-localhost) automatisch
+     * pullen — „man muss nichts tun". Fire-and-forget, blockt den Request nicht.
+     */
+    private void maybeProvision(AiModelConfig cfg) {
+        if (cfg == null || !"ollama".equalsIgnoreCase(cfg.getProvider())) return;
+        String url = serverResolver.resolveEffectiveBaseUrl(cfg);
+        if (url != null) provisioner.pullModelAsync(url, cfg.getModelId());
     }
 
     @DeleteMapping("/models/{id}")
