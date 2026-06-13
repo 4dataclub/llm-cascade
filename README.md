@@ -431,6 +431,36 @@ DELETE /api/provider-servers/{name}    löschen (Default nicht löschbar)
 Der Default-Server „localhost" wird beim ersten Backend-Start automatisch
 angelegt (`DefaultProviderServerInit`).
 
+### Auto-Provision: Modell landet automatisch auf dem Server (v0.8.1)
+
+„Man muss nichts tun": weist man ein Ollama-Modell einem Server zu, **pullt die
+Cascade das Modell dort automatisch** — du musst dich nicht per SSH auf den
+Server hängen und manuell `ollama pull` machen.
+
+Wichtig zum Verständnis: **die Cascade rechnet nie selbst, sie ist nur ein
+HTTP-Client zu Ollama.** Auf dem externen Server muss **Ollama bereits laufen**
+(seine Base-URL hast du ja eingetragen). „Aufsetzen" heißt hier nur: das Modell
+auf dieses Ollama ziehen.
+
+```
+[1] Server eintragen      gpu-box → http://gpu-box:11434/v1
+[2] Modell zuweisen (UI-Dropdown in der Modell-Tabelle)
+        │
+        ▼
+[3] Cascade ──POST {url}/api/pull {name}──▶ Ollama@gpu-box   (lädt die Gewichte)
+        │       (OllamaProvisioner, async, In-flight-Guard)
+        ▼
+[4] Generate ──POST {url}/v1/chat/completions──▶ Ollama@gpu-box
+        ▼
+[5] Ollama@gpu-box rechnet (GPU) ──Text──▶ Cascade ──▶ Aufrufer
+```
+
+Trigger: `modelCreate` + `modelUpdate` (bei `provider=ollama`) lösen den Pull aus
+— auch für den localhost-Default, damit lokale Modelle ohne Handgriff bereitstehen.
+Hinweis: für **Übersetzung** ist ein Cloud-Modell (DeepSeek/OpenRouter) meist
+billiger + besser als ein kleines lokales Modell auf CPU; lokale Server lohnen
+sich v.a. mit GPU oder aus Datenschutz-Gründen.
+
 ## Manueller Override (Switcher-Use-Case)
 
 EduPro vertraut Auto-Escalation, Switcher will manuelle Kontrolle. Caller
