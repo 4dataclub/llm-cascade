@@ -778,6 +778,97 @@ public class ApiController {
         return rows;
     }
 
+    // ─── Shared-Analytics (v0.18.0 — <ki-call-overview> + <ki-failover-analytics>) ──
+
+    /**
+     * v0.18.0 — Erfolgs-Trend: Calls/Tag der letzten {@code days} Tage,
+     * gesplittet in {@code success}/{@code failed}. Quelle fuer den
+     * Area-Chart in {@code <ki-call-overview>}.
+     *
+     * <p>Liefert {@code [{date,total,success,failed}]}, aufsteigend nach Datum.
+     * Leeres Array wenn keine Calls.
+     */
+    @GetMapping("/stats/trend")
+    public List<Map<String, Object>> statsTrend(
+            @RequestParam(name = "days", required = false, defaultValue = "30") int days) {
+        int clamped = Math.max(1, Math.min(days, 365));
+        LocalDateTime since = LocalDateTime.now().minusDays(clamped);
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Object[] r : callLogRepo.aggregateTrendByDaySince(since)) {
+            long total = ((Number) r[1]).longValue();
+            long success = ((Number) r[2]).longValue();
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("date", String.valueOf(r[0]));
+            row.put("total", total);
+            row.put("success", success);
+            row.put("failed", total - success);
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    /**
+     * v0.18.0 — KI-Calls-Totals fuer die Uebersichts-Cards in
+     * {@code <ki-call-overview>}: Calls in 24h/7d/30d, Erfolg/Fehlschlag
+     * (30d) und Summe Output-Chars (30d, Basis fuer Kosten-Schaetzung).
+     */
+    @GetMapping("/stats/totals")
+    public Map<String, Object> statsTotals() {
+        LocalDateTime now = LocalDateTime.now();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("last24h", callLogRepo.countByCalledAtAfter(now.minusDays(1)));
+        out.put("last7d", callLogRepo.countByCalledAtAfter(now.minusDays(7)));
+        out.put("last30d", callLogRepo.countByCalledAtAfter(now.minusDays(30)));
+        out.put("success30d", callLogRepo.countBySuccessAndCalledAtAfter(true, now.minusDays(30)));
+        out.put("failed30d", callLogRepo.countBySuccessAndCalledAtAfter(false, now.minusDays(30)));
+        out.put("outputChars30d", callLogRepo.sumOutputCharsSince(now.minusDays(30)));
+        return out;
+    }
+
+    /**
+     * v0.18.0 — Failover-Aufschluesselung (30 Tage, nur {@code switch_down}):
+     * pro Provider (Donut), pro Provider×Grund (Tabelle) und pro Grund.
+     * Quelle fuer {@code <ki-failover-analytics>}.
+     *
+     * <p>Liefert {@code {byProvider:[{provider,failovers}],
+     * byProviderReason:[{provider,reason,count}], byReason:[{reason,count}]}}.
+     */
+    @GetMapping("/stats/failover-breakdown")
+    public Map<String, Object> statsFailoverBreakdown() {
+        LocalDateTime since = LocalDateTime.now().minusDays(30);
+
+        List<Map<String, Object>> byProvider = new ArrayList<>();
+        for (Object[] r : failoverRepo.aggregateFailoverByProviderSince(since)) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("provider", String.valueOf(r[0]));
+            row.put("failovers", ((Number) r[1]).longValue());
+            byProvider.add(row);
+        }
+
+        List<Map<String, Object>> byProviderReason = new ArrayList<>();
+        for (Object[] r : failoverRepo.aggregateFailoverByProviderReasonSince(since)) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("provider", String.valueOf(r[0]));
+            row.put("reason", String.valueOf(r[1]));
+            row.put("count", ((Number) r[2]).longValue());
+            byProviderReason.add(row);
+        }
+
+        List<Map<String, Object>> byReason = new ArrayList<>();
+        for (Object[] r : failoverRepo.aggregateFailoverByReasonSince(since)) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("reason", String.valueOf(r[0]));
+            row.put("count", ((Number) r[1]).longValue());
+            byReason.add(row);
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("byProvider", byProvider);
+        out.put("byProviderReason", byProviderReason);
+        out.put("byReason", byReason);
+        return out;
+    }
+
     /**
      * v0.7.6 — Cooldown-State pro Modell. Konsumiert von Library-Component
      * {@code <ki-models-cooldown-state>}.

@@ -31,6 +31,20 @@ public interface LlmCallLogRepository extends JpaRepository<LlmCallLog, Long> {
         nativeQuery = true)
     List<Object[]> aggregateByDaySince(@Param("since") LocalDateTime since);
 
+    /**
+     * v0.18.0 — Erfolgs-Trend pro Tag: liefert {@code [day, total, success]}.
+     * Quelle fuer {@code GET /api/stats/trend} + Library-Component
+     * {@code <ki-call-overview>} (Area-Chart). {@code failed = total - success}
+     * rechnet der Endpoint.
+     */
+    @Query(value =
+        "SELECT DATE(called_at) AS day, COUNT(*) AS total, " +
+        "       SUM(CASE WHEN success THEN 1 ELSE 0 END) AS success " +
+        "FROM llm_call_log WHERE called_at > :since " +
+        "GROUP BY DATE(called_at) ORDER BY day ASC",
+        nativeQuery = true)
+    List<Object[]> aggregateTrendByDaySince(@Param("since") LocalDateTime since);
+
     /** Aggregate calls pro Sprache. */
     @Query(value =
         "SELECT COALESCE(lang, '?') AS lang, COUNT(*) AS n FROM llm_call_log " +
