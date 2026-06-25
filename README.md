@@ -554,6 +554,20 @@ POST /api/generate
 - Wenn Tier 2 > 30%: descriptions oder orderIdx prüfen
 - Drill-down via `service`-Tag zeigt welcher Caller am meisten eskaliert
 
+**Datenschutz-Schalter `logPromptSnippet` (Default AUS):** pro Call landet ein
+gekürzter Prompt-Ausschnitt (max. 160 Zeichen) in `llm_call_log.prompt_snippet`
+— **nur** wenn der Schalter explizit AN ist. Standardmäßig `null`, damit
+Kunden-Eingaben im Normalbetrieb nicht persistiert werden. Gedacht für
+Debug/Live-Watch; jederzeit zur Laufzeit umschaltbar (kein Rebuild):
+
+```bash
+curl -X POST http://localhost:8090/api/settings/logPromptSnippet -d 'true'   # AN
+curl -X POST http://localhost:8090/api/settings/logPromptSnippet -d 'false'  # AUS
+```
+
+`GET /api/stats/calls` liefert das Feld als `promptSnippet` mit aus (von den
+Watch-Skripten genutzt).
+
 **SQL-Beispiel:**
 ```sql
 SELECT service, COUNT(*) AS total,

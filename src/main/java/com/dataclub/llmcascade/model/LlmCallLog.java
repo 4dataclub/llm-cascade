@@ -49,6 +49,13 @@ public class LlmCallLog {
     @Column(length = 32)
     private String provider;
 
+    /** Optionaler, gekuerzter Ausschnitt des Prompts (max. 160 Zeichen) — NUR fuer
+     *  Debug/Live-Watch. Datenschutz: wird ausschliesslich befuellt wenn das Setting
+     *  {@code logPromptSnippet} explizit AN ist (Default AUS). Sonst {@code null},
+     *  damit Kunden-Eingaben im Normalbetrieb nicht persistiert werden. */
+    @Column(name = "prompt_snippet", length = 160)
+    private String promptSnippet;
+
     @Column(name = "called_at", nullable = false)
     private LocalDateTime calledAt;
 

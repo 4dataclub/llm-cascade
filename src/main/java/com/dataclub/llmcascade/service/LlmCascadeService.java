@@ -108,6 +108,12 @@ public class LlmCascadeService {
     /** Call-Kontext (Service-Name + Lang) den der rufende Service via {@link #tagNextCall} setzt. */
     private static final ThreadLocal<String[]> CALL_CONTEXT = new ThreadLocal<>();
 
+    /** Aktueller Prompt fuer den laufenden generate()-Call — nur fuer optionales
+     *  Snippet-Logging (Datenschutz-Schalter {@code logPromptSnippet}). Wird in
+     *  generate() gesetzt und im finally geleert, damit log() ihn lesen kann ohne
+     *  alle Call-Sites umzubauen. */
+    private static final ThreadLocal<String> CURRENT_PROMPT = new ThreadLocal<>();
+
     /** Vor jedem Call vom rufenden Service aufrufen — damit der Log-Eintrag service+lang enthaelt. */
     public void tagNextCall(String service, String lang) {
         CALL_CONTEXT.set(new String[] { service, lang });
@@ -236,11 +242,16 @@ public class LlmCascadeService {
                 + (resolvedCategory != null ? " fuer category=" + resolvedCategory : "") + ".");
         }
         GenerateOptions.Mode mode = opts.mode() == null ? GenerateOptions.Mode.CASCADE : opts.mode();
-        return switch (mode) {
-            case CASCADE -> dispatchCascade(prompt, cascade, opts);
-            case ROTATE  -> dispatchRotate(prompt, cascade, opts);
-            case FIXED   -> dispatchFixed(prompt, cascade, opts);
-        };
+        CURRENT_PROMPT.set(prompt);
+        try {
+            return switch (mode) {
+                case CASCADE -> dispatchCascade(prompt, cascade, opts);
+                case ROTATE  -> dispatchRotate(prompt, cascade, opts);
+                case FIXED   -> dispatchFixed(prompt, cascade, opts);
+            };
+        } finally {
+            CURRENT_PROMPT.remove();
+        }
     }
 
     // ─── Mode: CASCADE (default) ─────────────────────────────────────────────
@@ -504,6 +515,13 @@ public class LlmCascadeService {
                        : (ctx != null && ctx[0] != null) ? ctx[0] : "unknown";
         String lang    = (opts != null && opts.lang() != null) ? opts.lang()
                        : (ctx != null) ? ctx[1] : null;
+        // Datenschutz: Prompt-Snippet NUR wenn der Schalter explizit AN ist (Default AUS).
+        String promptSnippet = null;
+        try {
+            if (settings != null && settings.getBoolean(SettingsService.LOG_PROMPT_SNIPPET)) {
+                promptSnippet = truncate(CURRENT_PROMPT.get(), 160);
+            }
+        } catch (Exception ignored) { /* Setting nicht lesbar -> kein Snippet */ }
         try {
             callLog.save(LlmCallLog.builder()
                 .service(service)
@@ -512,6 +530,7 @@ public class LlmCascadeService {
                 .success(success)
                 .model(cfg == null ? null : cfg.getModelId())
                 .provider(cfg == null ? null : cfg.getProvider())
+                .promptSnippet(promptSnippet)
                 .build());
         } catch (Exception ignored) {}
     }

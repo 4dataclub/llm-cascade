@@ -32,12 +32,21 @@ public class SettingsService {
      */
     public static final String PREFERRED_CATEGORY    = "preferredCategory";
 
+    /**
+     * Datenschutz-Schalter: wenn AN, wird pro Call ein gekuerzter Prompt-Ausschnitt
+     * (max. 160 Zeichen) in {@code llm_call_log.prompt_snippet} gespeichert — nur fuer
+     * Debug/Live-Watch. Default AUS, damit Kunden-Eingaben im Normalbetrieb NICHT
+     * persistiert werden. Jederzeit zur Laufzeit umschaltbar (kein Rebuild).
+     */
+    public static final String LOG_PROMPT_SNIPPET    = "logPromptSnippet";
+
     /** Default-Werte falls noch nichts gesetzt wurde. Hier ALLE neuen Module
      *  eintragen, damit ein frischer DB-Start sofort sinnvolle Defaults hat. */
     private static final Map<String, String> DEFAULTS = Map.of(
         LIVE_SESSIONS_ENABLED, "false",
         STATISTICS_ENABLED,    "true",
-        PREFERRED_CATEGORY,    ""   // leer = Semantic Routing aktiv
+        PREFERRED_CATEGORY,    "",  // leer = Semantic Routing aktiv
+        LOG_PROMPT_SNIPPET,    "false"  // Datenschutz: Prompt-Snippet standardmaessig NICHT speichern
     );
 
     @Autowired private AppSettingRepository repo;
