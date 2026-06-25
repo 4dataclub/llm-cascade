@@ -267,6 +267,40 @@ llm-cascade durchläuft die Kategorien sortiert nach `category_meta.orderIdx`
 Auto-Escalation kombiniert beide Mechanismen: zuerst Failover innerhalb
 Tier, dann Escalate auf nächsten Tier wenn alles fehlschlägt.
 
+## Eine Frage, drei Türen — wer wählt die Kategorie?
+
+Die Mechanismen oben füllen **denselben einen `category`-Schlitz** pro Call.
+Stell dir llm-cascade als **Poststelle mit beschrifteten Fächern** vor: jede
+Anfrage ist ein Brief, der in genau **ein** Fach muss. Es gibt **eine Frage** —
+*„welches Fach / welcher Spezialist?"* — und **mehrere Türen** zur Antwort, mit
+fester Präzedenz (`ApiController`):
+
+```
+   Frage: "Welche Kategorie macht das?"
+   │
+ ① Body-`category` gesetzt   → explizites Etikett, der Caller weiß es schon
+   │   schlägt …
+ ② preferredCategory-Setting → manueller Override (UI-Toggle / "alles nach X")
+   │   schlägt …
+ ③ purpose gesetzt           → SemanticCategoryRouter rät aus dem Inhalt
+   │   sonst …
+ ④ general                   → Fallback
+```
+
+**Immer nur EINE Tür pro Brief** — ① Etikett > ② Override > ③ Scanner > ④ general.
+Nicht zwei gleichzeitig am selben Call.
+
+**Zwei Konsumenten, andere Tür:**
+
+| | **EduPro** | **Switcher Supermodell=AN** |
+|---|---|---|
+| Genutzte Tür | ③ Semantic (`purpose`) — bzw. ② Override | ① explizites `category` im Body |
+| Kategorie = | Task-Typ (content/dev/utility/general) | Compound `<rolle>-<pool>` |
+| Wer wählt | llm-cascade klassifiziert automatisch | Orchestrator-Agent labelt + manueller Pool |
+
+Beide nutzen **dieselbe Maschine** — der Unterschied ist nur, **wer** die Kategorie
+wählt und **worauf basierend**, nicht der Code-Pfad.
+
 ## Kategorien als Tiers — die zentrale Architektur-Idee
 
 Die `category_meta.orderIdx` ist nicht nur „UI-Sortierung" — sie definiert
