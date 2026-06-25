@@ -223,7 +223,13 @@ public class ApiController {
     public ResponseEntity<?> modelUpdate(@PathVariable Long id, @RequestBody Map<String, Object> body) {
         AiModelConfig cfg = modelRepo.findById(id).orElse(null);
         if (cfg == null) return ResponseEntity.notFound().build();
-        if (body.containsKey("enabled")) cfg.setEnabled(Boolean.TRUE.equals(body.get("enabled")));
+        boolean enabledFlipped = false;
+        boolean newEnabled = false;
+        if (body.containsKey("enabled")) {
+            newEnabled = Boolean.TRUE.equals(body.get("enabled"));
+            enabledFlipped = !Boolean.valueOf(newEnabled).equals(cfg.getEnabled());
+            cfg.setEnabled(newEnabled);
+        }
         if (body.containsKey("cooldown503OverrideSec")) {
             Object v = body.get("cooldown503OverrideSec");
             cfg.setCooldown503OverrideSec(v == null ? null : ((Number) v).intValue());
@@ -255,6 +261,14 @@ public class ApiController {
             cfg.setProviderBaseUrl(v == null || v.toString().isBlank() ? null : v.toString());
         }
         modelRepo.save(cfg);
+        if (enabledFlipped) {
+            failoverRepo.save(LlmFailoverEvent.builder()
+                .type(newEnabled ? "toggle_on" : "toggle_off")
+                .toModel(cfg.getModelId())
+                .reason("user_toggle")
+                .occurredAt(LocalDateTime.now())
+                .build());
+        }
         maybeProvision(cfg);
         return ResponseEntity.ok(Map.of("ok", true));
     }
@@ -613,6 +627,43 @@ public class ApiController {
         return result;
     }
 
+    /** Event-Typen die der Host (Switcher) extern loggen darf. Cascade-interne
+     *  Failover-Typen (switch_down/up, promote_primary) schreibt die Cascade selbst. */
+    private static final Set<String> LOGGABLE_EVENT_TYPES = Set.of(
+        "toggle_on", "toggle_off", "pool_switch", "supermodel_on", "supermodel_off");
+
+    /**
+     * v0.19.0 — Externer Event-Log fuer Host-seitige Umschaltungen (Switcher:
+     * Pool-Wechsel + Supermodell an/aus). Landet in derselben Timeline wie die
+     * Failover-Events. Nur Whitelist-Typen; alles andere → 400.
+     */
+    @PostMapping("/events/log")
+    public ResponseEntity<?> logEvent(@RequestBody Map<String, Object> body) {
+        Object rawType = body.get("type");
+        String type = rawType == null ? null : rawType.toString().trim();
+        if (type == null || !LOGGABLE_EVENT_TYPES.contains(type)) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "error", "type must be one of " + LOGGABLE_EVENT_TYPES));
+        }
+        String from = str(body.get("fromModel"));
+        String to = str(body.get("toModel"));
+        String reason = str(body.get("reason"));
+        failoverRepo.save(LlmFailoverEvent.builder()
+            .type(type)
+            .fromModel(from)
+            .toModel(to)
+            .reason(reason)
+            .occurredAt(LocalDateTime.now())
+            .build());
+        return ResponseEntity.ok(Map.of("ok", true));
+    }
+
+    private static String str(Object o) {
+        if (o == null) return null;
+        String s = o.toString().trim();
+        return s.isEmpty() ? null : s;
+    }
+
     /**
      * v0.7.2 — Quality-Stats pro Modell, default sortiert nach Score ASC
      * (schlechte zuerst — Admin will Probleme sehen, nicht die laufenden Top-Modelle).
@@ -776,6 +827,97 @@ public class ApiController {
         };
         rows.sort(cmp);
         return rows;
+    }
+
+    // ─── Shared-Analytics (v0.18.0 — <ki-call-overview> + <ki-failover-analytics>) ──
+
+    /**
+     * v0.18.0 — Erfolgs-Trend: Calls/Tag der letzten {@code days} Tage,
+     * gesplittet in {@code success}/{@code failed}. Quelle fuer den
+     * Area-Chart in {@code <ki-call-overview>}.
+     *
+     * <p>Liefert {@code [{date,total,success,failed}]}, aufsteigend nach Datum.
+     * Leeres Array wenn keine Calls.
+     */
+    @GetMapping("/stats/trend")
+    public List<Map<String, Object>> statsTrend(
+            @RequestParam(name = "days", required = false, defaultValue = "30") int days) {
+        int clamped = Math.max(1, Math.min(days, 365));
+        LocalDateTime since = LocalDateTime.now().minusDays(clamped);
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Object[] r : callLogRepo.aggregateTrendByDaySince(since)) {
+            long total = ((Number) r[1]).longValue();
+            long success = ((Number) r[2]).longValue();
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("date", String.valueOf(r[0]));
+            row.put("total", total);
+            row.put("success", success);
+            row.put("failed", total - success);
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    /**
+     * v0.18.0 — KI-Calls-Totals fuer die Uebersichts-Cards in
+     * {@code <ki-call-overview>}: Calls in 24h/7d/30d, Erfolg/Fehlschlag
+     * (30d) und Summe Output-Chars (30d, Basis fuer Kosten-Schaetzung).
+     */
+    @GetMapping("/stats/totals")
+    public Map<String, Object> statsTotals() {
+        LocalDateTime now = LocalDateTime.now();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("last24h", callLogRepo.countByCalledAtAfter(now.minusDays(1)));
+        out.put("last7d", callLogRepo.countByCalledAtAfter(now.minusDays(7)));
+        out.put("last30d", callLogRepo.countByCalledAtAfter(now.minusDays(30)));
+        out.put("success30d", callLogRepo.countBySuccessAndCalledAtAfter(true, now.minusDays(30)));
+        out.put("failed30d", callLogRepo.countBySuccessAndCalledAtAfter(false, now.minusDays(30)));
+        out.put("outputChars30d", callLogRepo.sumOutputCharsSince(now.minusDays(30)));
+        return out;
+    }
+
+    /**
+     * v0.18.0 — Failover-Aufschluesselung (30 Tage, nur {@code switch_down}):
+     * pro Provider (Donut), pro Provider×Grund (Tabelle) und pro Grund.
+     * Quelle fuer {@code <ki-failover-analytics>}.
+     *
+     * <p>Liefert {@code {byProvider:[{provider,failovers}],
+     * byProviderReason:[{provider,reason,count}], byReason:[{reason,count}]}}.
+     */
+    @GetMapping("/stats/failover-breakdown")
+    public Map<String, Object> statsFailoverBreakdown() {
+        LocalDateTime since = LocalDateTime.now().minusDays(30);
+
+        List<Map<String, Object>> byProvider = new ArrayList<>();
+        for (Object[] r : failoverRepo.aggregateFailoverByProviderSince(since)) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("provider", String.valueOf(r[0]));
+            row.put("failovers", ((Number) r[1]).longValue());
+            byProvider.add(row);
+        }
+
+        List<Map<String, Object>> byProviderReason = new ArrayList<>();
+        for (Object[] r : failoverRepo.aggregateFailoverByProviderReasonSince(since)) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("provider", String.valueOf(r[0]));
+            row.put("reason", String.valueOf(r[1]));
+            row.put("count", ((Number) r[2]).longValue());
+            byProviderReason.add(row);
+        }
+
+        List<Map<String, Object>> byReason = new ArrayList<>();
+        for (Object[] r : failoverRepo.aggregateFailoverByReasonSince(since)) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("reason", String.valueOf(r[0]));
+            row.put("count", ((Number) r[1]).longValue());
+            byReason.add(row);
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("byProvider", byProvider);
+        out.put("byProviderReason", byProviderReason);
+        out.put("byReason", byReason);
+        return out;
     }
 
     /**
