@@ -223,7 +223,13 @@ public class ApiController {
     public ResponseEntity<?> modelUpdate(@PathVariable Long id, @RequestBody Map<String, Object> body) {
         AiModelConfig cfg = modelRepo.findById(id).orElse(null);
         if (cfg == null) return ResponseEntity.notFound().build();
-        if (body.containsKey("enabled")) cfg.setEnabled(Boolean.TRUE.equals(body.get("enabled")));
+        boolean enabledFlipped = false;
+        boolean newEnabled = false;
+        if (body.containsKey("enabled")) {
+            newEnabled = Boolean.TRUE.equals(body.get("enabled"));
+            enabledFlipped = !Boolean.valueOf(newEnabled).equals(cfg.getEnabled());
+            cfg.setEnabled(newEnabled);
+        }
         if (body.containsKey("cooldown503OverrideSec")) {
             Object v = body.get("cooldown503OverrideSec");
             cfg.setCooldown503OverrideSec(v == null ? null : ((Number) v).intValue());
@@ -255,6 +261,14 @@ public class ApiController {
             cfg.setProviderBaseUrl(v == null || v.toString().isBlank() ? null : v.toString());
         }
         modelRepo.save(cfg);
+        if (enabledFlipped) {
+            failoverRepo.save(LlmFailoverEvent.builder()
+                .type(newEnabled ? "toggle_on" : "toggle_off")
+                .toModel(cfg.getModelId())
+                .reason("user_toggle")
+                .occurredAt(LocalDateTime.now())
+                .build());
+        }
         maybeProvision(cfg);
         return ResponseEntity.ok(Map.of("ok", true));
     }
@@ -611,6 +625,43 @@ public class ApiController {
         result.put("recent", events);
         result.put("total30d", count30);
         return result;
+    }
+
+    /** Event-Typen die der Host (Switcher) extern loggen darf. Cascade-interne
+     *  Failover-Typen (switch_down/up, promote_primary) schreibt die Cascade selbst. */
+    private static final Set<String> LOGGABLE_EVENT_TYPES = Set.of(
+        "toggle_on", "toggle_off", "pool_switch", "supermodel_on", "supermodel_off");
+
+    /**
+     * v0.19.0 — Externer Event-Log fuer Host-seitige Umschaltungen (Switcher:
+     * Pool-Wechsel + Supermodell an/aus). Landet in derselben Timeline wie die
+     * Failover-Events. Nur Whitelist-Typen; alles andere → 400.
+     */
+    @PostMapping("/events/log")
+    public ResponseEntity<?> logEvent(@RequestBody Map<String, Object> body) {
+        Object rawType = body.get("type");
+        String type = rawType == null ? null : rawType.toString().trim();
+        if (type == null || !LOGGABLE_EVENT_TYPES.contains(type)) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "error", "type must be one of " + LOGGABLE_EVENT_TYPES));
+        }
+        String from = str(body.get("fromModel"));
+        String to = str(body.get("toModel"));
+        String reason = str(body.get("reason"));
+        failoverRepo.save(LlmFailoverEvent.builder()
+            .type(type)
+            .fromModel(from)
+            .toModel(to)
+            .reason(reason)
+            .occurredAt(LocalDateTime.now())
+            .build());
+        return ResponseEntity.ok(Map.of("ok", true));
+    }
+
+    private static String str(Object o) {
+        if (o == null) return null;
+        String s = o.toString().trim();
+        return s.isEmpty() ? null : s;
     }
 
     /**
