@@ -630,7 +630,8 @@ public class ApiController {
     /** Event-Typen die der Host (Switcher) extern loggen darf. Cascade-interne
      *  Failover-Typen (switch_down/up, promote_primary) schreibt die Cascade selbst. */
     private static final Set<String> LOGGABLE_EVENT_TYPES = Set.of(
-        "toggle_on", "toggle_off", "pool_switch", "supermodel_on", "supermodel_off");
+        "toggle_on", "toggle_off", "pool_switch", "supermodel_on", "supermodel_off",
+        "model_switch");
 
     /**
      * v0.19.0 — Externer Event-Log fuer Host-seitige Umschaltungen (Switcher:
