@@ -5,6 +5,8 @@ name: publish-image
 #   • Tag-Push (z.B. 0.9.0)  → Image-Tag = der git-Tag, gebaut aus dem Tag-Stand.
 #   • workflow_dispatch      → Image-Tag = Eingabe, gebaut aus dem gewählten Branch/Ref.
 # Nutzt das Actions-eigene GITHUB_TOKEN (packages: write) — kein PAT, kein Laptop-Push.
+# Baut MULTI-ARCH (linux/amd64 + linux/arm64) via QEMU+buildx → ein Manifest-List-Tag,
+# aus dem amd64-Server UND Apple-Silicon-Mac je die passende Variante ziehen (kein lokales Build nötig).
 
 on:
   push:
@@ -32,6 +34,9 @@ jobs:
         id: v
         run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
+      - name: Set up QEMU (arm64-Emulation für Cross-Build)
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -46,5 +51,6 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ghcr.io/4dataclub/llm-cascade:${{ steps.v.outputs.version }}
