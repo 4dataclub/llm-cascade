@@ -69,6 +69,28 @@ public class AiModelConfig {
     private String category;
 
     /**
+     * Pool-Dimension der Pool x Area Matrix (z.B. "cloud", "free", "local").
+     * User-gesteuert — wird nie automatisch geaendert. Nullable fuer Backward-Compat.
+     */
+    @Column(length = 50)
+    private String pool;
+
+    /**
+     * Area-Dimension der Pool x Area Matrix (z.B. "implement", "content", "cloud").
+     * Bei supermodel=AUS: frei benennbar (Semantic-Routing waehlt). Bei supermodel=AN:
+     * fixe Rollen implement/review/research/dispatch/orchestrator.
+     */
+    @Column(length = 50)
+    private String area;
+
+    /**
+     * Markiert den Orchestrator-Eintrag (isOrchestrator=true) in der supermodel=AN-Matrix.
+     * Nur eine Area pro Pool sollte dieses Flag tragen. Nullable fuer Backward-Compat.
+     */
+    @Column(name = "is_orchestrator")
+    private Boolean orchestrator;
+
+    /**
      * Pointer auf {@link AppSetting#getKey()} unter dem der API-Key liegt
      * (z.B. "geminiApiKey", "openrouterApiKey", "anthropicApiKey").
      * Ein Key pro Provider; Modelle desselben Providers teilen den Key.
@@ -161,6 +183,36 @@ public class AiModelConfig {
         if (enabled == null) enabled = Boolean.TRUE;
         if (autoDisabled == null) autoDisabled = Boolean.FALSE;
         if (category == null || category.isBlank()) category = "general";
+        derivePoolAreaFromCategory();
+    }
+
+    /**
+     * Leitet pool + area aus dem category-Feld ab wenn sie noch nicht gesetzt sind.
+     * Format "area-pool" (z.B. "implement-cloud") wird auf pool=cloud, area=implement aufgeteilt.
+     * Einfache Kategorie ohne Bindestrich (z.B. "cloud", "content") wird als area gesetzt.
+     */
+    public void derivePoolAreaFromCategory() {
+        if ((pool != null && !pool.isBlank()) || (area != null && !area.isBlank())) {
+            return; // bereits gesetzt, nicht ueberschreiben
+        }
+        String cat = category;
+        if (cat == null || cat.isBlank() || "general".equalsIgnoreCase(cat)) {
+            return;
+        }
+        int lastDash = cat.lastIndexOf('-');
+        if (lastDash > 0 && lastDash < cat.length() - 1) {
+            pool = cat.substring(lastDash + 1).toLowerCase();
+            area = cat.substring(0, lastDash).toLowerCase();
+            orchestrator = "orchestrator".equals(area) ? Boolean.TRUE : null;
+        } else {
+            // Einfache Kategorie ohne Bindestrich: wenn es ein bekannter Pool-Name ist
+            // (cloud/free/local), ist es ein Pool-Catch-All (pool=area=cat).
+            // Andernfalls ist es eine Semantic-Area ohne Pool-Bindung.
+            area = cat.toLowerCase();
+            if ("cloud".equals(area) || "free".equals(area) || "local".equals(area)) {
+                pool = area;
+            }
+        }
     }
 
     @PreUpdate

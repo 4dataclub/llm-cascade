@@ -13,6 +13,15 @@ public interface LlmCallLogRepository extends JpaRepository<LlmCallLog, Long> {
     /** Letzte 50 Calls fuer Stats-UI. */
     List<LlmCallLog> findTop50ByOrderByCalledAtDesc();
 
+    /** Letzte N Calls mit gesetztem Prompt-Snippet — fuer den UI-Log-Viewer
+     *  ({@code GET /api/stats/log-snippets}). Zeilen ohne Snippet (Default,
+     *  Datenschutz) werden ausgeblendet. */
+    @Query(value =
+        "SELECT * FROM llm_call_log WHERE prompt_snippet IS NOT NULL " +
+        "ORDER BY called_at DESC LIMIT :limit",
+        nativeQuery = true)
+    List<LlmCallLog> findRecentWithSnippet(@Param("limit") int limit);
+
     long countByCalledAtAfter(LocalDateTime since);
 
     long countBySuccessAndCalledAtAfter(boolean success, LocalDateTime since);

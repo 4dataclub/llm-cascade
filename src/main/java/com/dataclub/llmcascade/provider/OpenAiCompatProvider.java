@@ -123,6 +123,80 @@ public class OpenAiCompatProvider implements LlmProvider {
         return extractText(resp);
     }
 
+    /**
+     * Route A — Tool-Passthrough. Schickt die volle messages-Liste + tools an
+     * {@code {baseUrl}/chat/completions} und parst content + tool_calls.
+     * Ollama unterstuetzt das auf seinem /v1-Endpoint (OpenAI-kompatibel), ebenso
+     * OpenRouter/OpenAI/DeepSeek.
+     */
+    @Override
+    @SuppressWarnings("unchecked")
+    public com.dataclub.llmcascade.service.ChatResult generateChat(
+            List<Map<String, Object>> messages,
+            List<Map<String, Object>> tools,
+            Object toolChoice,
+            String modelId, String apiKey, String baseUrlOverride) {
+
+        String effBase = (baseUrlOverride != null && !baseUrlOverride.isBlank())
+            ? (baseUrlOverride.endsWith("/") ? baseUrlOverride.substring(0, baseUrlOverride.length() - 1) : baseUrlOverride)
+            : this.baseUrl;
+        if (requiresApiKey && (apiKey == null || apiKey.isBlank())) {
+            throw new LlmException(LlmException.Type.CLIENT_ERROR, 401, "API key is empty");
+        }
+
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("model", modelId);
+        body.put("messages", messages != null ? messages : List.of());
+        if (tools != null && !tools.isEmpty()) {
+            body.put("tools", tools);
+            if (toolChoice != null) {
+                body.put("tool_choice", toolChoice);
+            }
+        }
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        if (requiresApiKey && apiKey != null && !apiKey.isBlank()) {
+            headers.set("Authorization", "Bearer " + apiKey);
+        }
+        HttpEntity<Map<String, Object>> req = new HttpEntity<>(body, headers);
+
+        ResponseEntity<Map> resp;
+        try {
+            resp = restTemplate.postForEntity(effBase + "/chat/completions", req, Map.class);
+        } catch (HttpStatusCodeException ex) {
+            throw mapHttpError(ex);
+        }
+
+        Map<?, ?> respBody = resp.getBody();
+        if (respBody == null) {
+            throw new LlmException(LlmException.Type.SERVER_ERROR, resp.getStatusCode().value(),
+                "OpenAI-compat returned empty body");
+        }
+        List<Map<String, Object>> choices = (List<Map<String, Object>>) respBody.get("choices");
+        if (choices == null || choices.isEmpty()) {
+            throw new LlmException(LlmException.Type.SERVER_ERROR, resp.getStatusCode().value(),
+                "OpenAI-compat returned no choices");
+        }
+        Map<String, Object> choice0 = choices.get(0);
+        Map<String, Object> message = (Map<String, Object>) choice0.get("message");
+        if (message == null) {
+            throw new LlmException(LlmException.Type.SERVER_ERROR, resp.getStatusCode().value(),
+                "OpenAI-compat choice has no message");
+        }
+        Object content = message.get("content");
+        List<Map<String, Object>> toolCalls = (List<Map<String, Object>>) message.get("tool_calls");
+        Object finish = choice0.get("finish_reason");
+        String finishReason = finish != null ? finish.toString()
+            : (toolCalls != null && !toolCalls.isEmpty() ? "tool_calls" : "stop");
+
+        return new com.dataclub.llmcascade.service.ChatResult(
+            content == null ? "" : content.toString(),
+            toolCalls,
+            finishReason,
+            null);
+    }
+
     private LlmException mapHttpError(HttpStatusCodeException ex) {
         int status = ex.getStatusCode().value();
         String body = ex.getResponseBodyAsString();

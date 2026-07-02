@@ -362,6 +362,73 @@ public class LlmCascadeService {
             lastError);
     }
 
+    // ─── Route A — Tool-Passthrough Chat-Pfad (isoliert vom Text-dispatchCascade) ──
+
+    /**
+     * Tool-faehiger Chat-Aufruf. Eigene, schlanke Failover-Schleife ueber dieselbe
+     * Cascade (loadCascade) — der text-only {@link #dispatchCascade} bleibt voellig
+     * unberuehrt. Reicht messages + tools an den Provider durch und gibt
+     * content + tool_calls zurueck. Failover auf das naechste Modell bei Fehler,
+     * inkl. einfachem Cooldown.
+     */
+    public ChatResult generateChat(String category,
+                                   List<Map<String, Object>> messages,
+                                   List<Map<String, Object>> tools,
+                                   Object toolChoice) {
+        List<AiModelConfig> cascade = loadCascade(category);
+        if (cascade.isEmpty()) {
+            throw new RuntimeException("LLM-Cascade ist leer — keine enabled Modelle in ai_model_config"
+                + (category != null ? " fuer category=" + category : "") + ".");
+        }
+        final String cascadeName = category;
+        final Map<String, Long> cooldownUntil = cooldownMapFor(cascadeName);
+        long now = System.currentTimeMillis();
+        RuntimeException lastError = null;
+        AiModelConfig lastModel = null;
+
+        int startIdx = activeIdxFor(cascadeName);
+        if (startIdx >= cascade.size()) {
+            startIdx = 0;
+        }
+        for (int i = startIdx; i < cascade.size(); i++) {
+            AiModelConfig cfg = cascade.get(i);
+            String stateKey = stateKey(cfg);
+            Long until = cooldownUntil.get(stateKey);
+            if (until != null && until > now) {
+                continue;
+            }
+            lastModel = cfg;
+            LlmProvider provider = providers.get(cfg.getProvider());
+            if (provider == null) {
+                System.err.println("[CHAT] kein Provider-Bean fuer '" + cfg.getProvider() + "' — skip " + cfg.getModelId());
+                continue;
+            }
+            String apiKey = resolveApiKeyForSetting(cfg.getApiKeySettingKey());
+            if (apiKey == null || apiKey.isBlank()) {
+                System.err.println("[CHAT] " + stateKey + " uebersprungen — Key '" + cfg.getApiKeySettingKey() + "' nicht gesetzt");
+                continue;
+            }
+            String baseUrl = serverResolver.resolveEffectiveBaseUrl(cfg);
+            try {
+                ChatResult r = provider.generateChat(messages, tools, toolChoice, cfg.getModelId(), apiKey, baseUrl);
+                setActiveIdxFor(cascadeName, i);
+                System.err.println("[CHAT] ok " + stateKey
+                    + (r.hasToolCalls() ? " (tool_calls=" + r.toolCalls().size() + ")" : ""));
+                return new ChatResult(r.content(), r.toolCalls(), r.finishReason(), stateKey);
+            } catch (LlmException ex) {
+                long cdMs = DEFAULT_503_COOLDOWN_MS;
+                cooldownUntil.put(stateKey, System.currentTimeMillis() + cdMs);
+                lastError = new RuntimeException("[CHAT] " + stateKey + " " + ex.getType() + ": " + ex.getMessage(), ex);
+                System.err.println("[CHAT] " + stateKey + " Fehler (" + ex.getType() + ") → failover zum naechsten");
+            } catch (Exception other) {
+                lastError = new RuntimeException("[CHAT] " + stateKey + " unexpected: " + other.getMessage(), other);
+                System.err.println("[CHAT] " + stateKey + " unexpected: " + other.getMessage());
+            }
+        }
+        throw new RuntimeException("Chat-Cascade exhausted — letztes Modell "
+            + (lastModel == null ? "(keins)" : stateKey(lastModel)), lastError);
+    }
+
     // ─── Mode: ROTATE — Round-Robin pro Service-Tag, kein Failover ────────────
 
     private GenerateResult dispatchRotate(String prompt, List<AiModelConfig> cascade, GenerateOptions opts) {
@@ -468,11 +535,41 @@ public class LlmCascadeService {
      * Aufrufer). Bei gesetzter Kategorie kommen die {@code "general"}-Modelle
      * automatisch mit dazu -- bestehende Eintraege ohne explizite Kategorie
      * sollen weiter funktionieren bis sie umgestellt sind.
+     *
+     * Unterstuetzt zusaetzlich zwei neue Formate fuer Pool x Area Routing:
+     *  - {@code "pool:area"} (neu, explizit) — filtert direkt per pool+area-Spalten
+     *  - {@code "area-pool"} (legacy, z.B. "implement-cloud") — versucht zuerst
+     *    pool+area, faellt auf category-String zurueck wenn keine Treffer.
      */
     private List<AiModelConfig> loadCascade(String category) {
         if (category == null || category.isBlank() || "general".equalsIgnoreCase(category)) {
             return modelRepo.findByEnabledTrueAndAutoDisabledFalseOrderByOrderIdxAsc();
         }
+
+        // pool:area Format (explizit neu)
+        if (category.contains(":")) {
+            String[] parts = category.split(":", 2);
+            if (parts.length == 2 && !parts[0].isBlank() && !parts[1].isBlank()) {
+                List<AiModelConfig> byPoolArea = modelRepo.findCascadeByPoolAndArea(
+                    parts[0].toLowerCase(), parts[1].toLowerCase());
+                if (!byPoolArea.isEmpty()) {
+                    return byPoolArea;
+                }
+            }
+        }
+
+        // area-pool Legacy-Format: zuerst per pool+area Spalten versuchen
+        int lastDash = category.lastIndexOf('-');
+        if (lastDash > 0 && lastDash < category.length() - 1) {
+            String pool = category.substring(lastDash + 1).toLowerCase();
+            String area = category.substring(0, lastDash).toLowerCase();
+            List<AiModelConfig> byPoolArea = modelRepo.findCascadeByPoolAndArea(pool, area);
+            if (!byPoolArea.isEmpty()) {
+                return byPoolArea;
+            }
+        }
+
+        // Fallback: category-String (Backward-Compat fuer edupro und bestehende Eintraege)
         return modelRepo.findCascadeByCategoryIn(List.of(category.toLowerCase(), "general"));
     }
 
@@ -530,6 +627,7 @@ public class LlmCascadeService {
                 .success(success)
                 .model(cfg == null ? null : cfg.getModelId())
                 .provider(cfg == null ? null : cfg.getProvider())
+                .category(opts != null ? opts.category() : null)
                 .promptSnippet(promptSnippet)
                 .build());
         } catch (Exception ignored) {}
