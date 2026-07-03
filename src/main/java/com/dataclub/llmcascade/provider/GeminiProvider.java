@@ -61,6 +61,129 @@ public class GeminiProvider implements LlmProvider {
         return extractText(response);
     }
 
+    private static final com.fasterxml.jackson.databind.ObjectMapper MAPPER =
+        new com.fasterxml.jackson.databind.ObjectMapper();
+
+    /**
+     * Route A — Tool-Passthrough fuer Gemini. Normalisiert OpenAI-Format
+     * (messages/tools/tool_choice) auf die Gemini generateContent-API
+     * (contents/tools.functionDeclarations/toolConfig) und das ausgehende
+     * Gemini-Format (text- + functionCall-parts) zurueck auf OpenAI
+     * (content + tool_calls).
+     */
+    @Override
+    @SuppressWarnings("unchecked")
+    public com.dataclub.llmcascade.service.ChatResult generateChat(
+            List<Map<String, Object>> messages,
+            List<Map<String, Object>> tools,
+            Object toolChoice,
+            String modelId, String apiKey, String baseUrlOverride) {
+
+        if (apiKey == null || apiKey.isBlank()) {
+            throw new LlmException(LlmException.Type.CLIENT_ERROR, 401, "API key is empty");
+        }
+
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        StringBuilder system = new StringBuilder();
+        List<Map<String, Object>> contents = new java.util.ArrayList<>();
+        if (messages != null) {
+            for (Map<String, Object> m : messages) {
+                Object role = m.get("role");
+                Object content = m.get("content");
+                if ("system".equals(role)) {
+                    if (content != null) {
+                        system.append(system.length() > 0 ? "\n" : "").append(content);
+                    }
+                } else if ("tool".equals(role)) {
+                    Map<String, Object> fr = Map.of("functionResponse",
+                        Map.of("name", String.valueOf(m.getOrDefault("name", "tool")),
+                               "response", Map.of("content", String.valueOf(content))));
+                    contents.add(Map.of("role", "user", "parts", List.of(fr)));
+                } else {
+                    String gRole = "assistant".equals(role) ? "model" : "user";
+                    contents.add(Map.of("role", gRole, "parts", List.of(Map.of("text", content == null ? "" : content))));
+                }
+            }
+        }
+        body.put("contents", contents);
+        if (system.length() > 0) {
+            body.put("system_instruction", Map.of("parts", List.of(Map.of("text", system.toString()))));
+        }
+        if (tools != null && !tools.isEmpty()) {
+            List<Map<String, Object>> decls = new java.util.ArrayList<>();
+            for (Map<String, Object> t : tools) {
+                Map<String, Object> fn = (Map<String, Object>) t.get("function");
+                if (fn == null) {
+                    continue;
+                }
+                Map<String, Object> d = new java.util.LinkedHashMap<>();
+                d.put("name", fn.get("name"));
+                d.put("description", fn.get("description"));
+                d.put("parameters", fn.getOrDefault("parameters", Map.of("type", "object")));
+                decls.add(d);
+            }
+            body.put("tools", List.of(Map.of("functionDeclarations", decls)));
+            String mode = "auto".equals(toolChoice) || toolChoice == null ? "AUTO"
+                : ("required".equals(toolChoice) ? "ANY" : "AUTO");
+            body.put("toolConfig", Map.of("functionCallingConfig", Map.of("mode", mode)));
+        }
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        HttpEntity<Map<String, Object>> request = new HttpEntity<>(body, headers);
+        String url = String.format(URL_TEMPLATE, modelId, apiKey);
+
+        ResponseEntity<Map> response;
+        try {
+            response = restTemplate.postForEntity(url, request, Map.class);
+        } catch (HttpStatusCodeException ex) {
+            throw mapHttpError(ex);
+        }
+
+        Map<?, ?> respBody = response.getBody();
+        if (respBody == null) {
+            throw new LlmException(LlmException.Type.SERVER_ERROR, response.getStatusCode().value(),
+                "Gemini returned empty body");
+        }
+        List<Map<String, Object>> candidates = (List<Map<String, Object>>) respBody.get("candidates");
+        if (candidates == null || candidates.isEmpty()) {
+            throw new LlmException(LlmException.Type.SERVER_ERROR, response.getStatusCode().value(),
+                "Gemini returned no candidates");
+        }
+        Map<String, Object> firstContent = (Map<String, Object>) candidates.get(0).get("content");
+        StringBuilder text = new StringBuilder();
+        List<Map<String, Object>> toolCalls = new java.util.ArrayList<>();
+        if (firstContent != null) {
+            List<Map<String, Object>> parts = (List<Map<String, Object>>) firstContent.get("parts");
+            if (parts != null) {
+                int idx = 0;
+                for (Map<String, Object> p : parts) {
+                    if (p.get("text") != null) {
+                        text.append(p.get("text"));
+                    } else if (p.get("functionCall") instanceof Map<?, ?> fc) {
+                        String args;
+                        try {
+                            args = MAPPER.writeValueAsString(((Map<String, Object>) fc).getOrDefault("args", Map.of()));
+                        } catch (Exception e) {
+                            args = "{}";
+                        }
+                        Map<String, Object> fn = new java.util.LinkedHashMap<>();
+                        fn.put("name", ((Map<String, Object>) fc).get("name"));
+                        fn.put("arguments", args);
+                        Map<String, Object> call = new java.util.LinkedHashMap<>();
+                        call.put("id", "call_gemini_" + (idx++));
+                        call.put("type", "function");
+                        call.put("function", fn);
+                        toolCalls.add(call);
+                    }
+                }
+            }
+        }
+        String finish = toolCalls.isEmpty() ? "stop" : "tool_calls";
+        return new com.dataclub.llmcascade.service.ChatResult(
+            text.toString(), toolCalls.isEmpty() ? null : toolCalls, finish, null);
+    }
+
     private LlmException mapHttpError(HttpStatusCodeException ex) {
         int status = ex.getStatusCode().value();
         String body = ex.getResponseBodyAsString();

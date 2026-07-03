@@ -61,6 +61,133 @@ public class AnthropicProvider implements LlmProvider {
         return extractText(resp);
     }
 
+    private static final com.fasterxml.jackson.databind.ObjectMapper MAPPER =
+        new com.fasterxml.jackson.databind.ObjectMapper();
+
+    /**
+     * Route A — Tool-Passthrough fuer Anthropic. Normalisiert das eingehende
+     * OpenAI-Format (messages/tools/tool_choice) auf die Anthropic Messages API
+     * und das ausgehende Anthropic-Format (text- + tool_use-Bloecke) zurueck auf
+     * OpenAI (content + tool_calls).
+     */
+    @Override
+    @SuppressWarnings("unchecked")
+    public com.dataclub.llmcascade.service.ChatResult generateChat(
+            List<Map<String, Object>> messages,
+            List<Map<String, Object>> tools,
+            Object toolChoice,
+            String modelId, String apiKey, String baseUrlOverride) {
+
+        if (apiKey == null || apiKey.isBlank()) {
+            throw new LlmException(LlmException.Type.CLIENT_ERROR, 401, "Anthropic API key is empty");
+        }
+
+        // system-Messages auf das top-level system-Feld heben, Rest konvertieren
+        StringBuilder system = new StringBuilder();
+        List<Map<String, Object>> antMessages = new java.util.ArrayList<>();
+        if (messages != null) {
+            for (Map<String, Object> m : messages) {
+                Object role = m.get("role");
+                if ("system".equals(role)) {
+                    Object c = m.get("content");
+                    if (c != null) {
+                        system.append(system.length() > 0 ? "\n" : "").append(c);
+                    }
+                } else if ("tool".equals(role)) {
+                    // OpenAI tool-result → Anthropic user/tool_result-Block
+                    Map<String, Object> tr = new java.util.LinkedHashMap<>();
+                    tr.put("type", "tool_result");
+                    tr.put("tool_use_id", m.get("tool_call_id"));
+                    tr.put("content", String.valueOf(m.get("content")));
+                    antMessages.add(Map.of("role", "user", "content", List.of(tr)));
+                } else {
+                    antMessages.add(Map.of("role", role, "content", m.get("content") == null ? "" : m.get("content")));
+                }
+            }
+        }
+
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("model", modelId);
+        body.put("max_tokens", DEFAULT_MAX_TOKENS);
+        if (system.length() > 0) {
+            body.put("system", system.toString());
+        }
+        body.put("messages", antMessages);
+        if (tools != null && !tools.isEmpty()) {
+            List<Map<String, Object>> antTools = new java.util.ArrayList<>();
+            for (Map<String, Object> t : tools) {
+                Map<String, Object> fn = (Map<String, Object>) t.get("function");
+                if (fn == null) {
+                    continue;
+                }
+                Map<String, Object> at = new java.util.LinkedHashMap<>();
+                at.put("name", fn.get("name"));
+                at.put("description", fn.get("description"));
+                at.put("input_schema", fn.getOrDefault("parameters", Map.of("type", "object")));
+                antTools.add(at);
+            }
+            body.put("tools", antTools);
+            // tool_choice: OpenAI "auto"/"none"/{...} → Anthropic {type:auto|any|tool}
+            if (toolChoice == null || "auto".equals(toolChoice)) {
+                body.put("tool_choice", Map.of("type", "auto"));
+            } else if ("required".equals(toolChoice)) {
+                body.put("tool_choice", Map.of("type", "any"));
+            }
+        }
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("x-api-key", apiKey);
+        headers.set("anthropic-version", "2023-06-01");
+        HttpEntity<Map<String, Object>> req = new HttpEntity<>(body, headers);
+
+        ResponseEntity<Map> resp;
+        try {
+            resp = restTemplate.postForEntity(URL, req, Map.class);
+        } catch (HttpStatusCodeException ex) {
+            throw mapHttpError(ex);
+        }
+
+        Map<?, ?> respBody = resp.getBody();
+        if (respBody == null) {
+            throw new LlmException(LlmException.Type.SERVER_ERROR, resp.getStatusCode().value(),
+                "Anthropic returned empty body");
+        }
+        List<Map<String, Object>> content = (List<Map<String, Object>>) respBody.get("content");
+        StringBuilder text = new StringBuilder();
+        List<Map<String, Object>> toolCalls = new java.util.ArrayList<>();
+        if (content != null) {
+            for (Map<String, Object> block : content) {
+                if ("text".equals(block.get("type"))) {
+                    Object t = block.get("text");
+                    if (t != null) {
+                        text.append(t);
+                    }
+                } else if ("tool_use".equals(block.get("type"))) {
+                    String args;
+                    try {
+                        args = MAPPER.writeValueAsString(block.getOrDefault("input", Map.of()));
+                    } catch (Exception e) {
+                        args = "{}";
+                    }
+                    Map<String, Object> fn = new java.util.LinkedHashMap<>();
+                    fn.put("name", block.get("name"));
+                    fn.put("arguments", args);
+                    Map<String, Object> call = new java.util.LinkedHashMap<>();
+                    call.put("id", block.get("id"));
+                    call.put("type", "function");
+                    call.put("function", fn);
+                    toolCalls.add(call);
+                }
+            }
+        }
+        Object stopReason = respBody.get("stop_reason");
+        String finish = "tool_use".equals(stopReason) ? "tool_calls"
+            : (toolCalls.isEmpty() ? "stop" : "tool_calls");
+        return new com.dataclub.llmcascade.service.ChatResult(
+            text.toString(), toolCalls.isEmpty() ? null : toolCalls, finish, null);
+    }
+
     private LlmException mapHttpError(HttpStatusCodeException ex) {
         int status = ex.getStatusCode().value();
         String body = ex.getResponseBodyAsString();

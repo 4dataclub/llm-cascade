@@ -147,6 +147,9 @@ public class ApiController {
             m.put("modelId", c.getModelId());
             m.put("displayName", c.getDisplayName());
             m.put("category", c.getCategory() == null || c.getCategory().isBlank() ? "general" : c.getCategory());
+            m.put("pool", c.getPool());
+            m.put("area", c.getArea());
+            m.put("orchestrator", Boolean.TRUE.equals(c.getOrchestrator()));
             m.put("apiKeySettingKey", c.getApiKeySettingKey());
             m.put("enabled", c.getEnabled());
             m.put("orderIdx", c.getOrderIdx());
@@ -631,7 +634,7 @@ public class ApiController {
      *  Failover-Typen (switch_down/up, promote_primary) schreibt die Cascade selbst. */
     private static final Set<String> LOGGABLE_EVENT_TYPES = Set.of(
         "toggle_on", "toggle_off", "pool_switch", "supermodel_on", "supermodel_off",
-        "model_switch");
+        "model_switch", "auto_on", "auto_off");
 
     /**
      * v0.19.0 — Externer Event-Log fuer Host-seitige Umschaltungen (Switcher:
@@ -875,6 +878,40 @@ public class ApiController {
         out.put("failed30d", callLogRepo.countBySuccessAndCalledAtAfter(false, now.minusDays(30)));
         out.put("outputChars30d", callLogRepo.sumOutputCharsSince(now.minusDays(30)));
         return out;
+    }
+
+    /**
+     * Read-only Log-Viewer-Feed: die letzten {@code limit} Calls mit gesetztem
+     * Prompt-Snippet, absteigend nach {@code calledAt}. Snippets werden nur
+     * befuellt, wenn das Setting {@code logPromptSnippet} AN ist (Default AUS);
+     * Zeilen ohne Snippet werden ausgeblendet.
+     *
+     * <p>Liefert pro Zeile: {@code id, service, lang, outputChars, success,
+     * model, provider, category, promptSnippet, calledAt}. {@code calledAt}
+     * als ISO-8601-String (LocalDateTime.toString()).
+     *
+     * @param limit Anzahl Zeilen, geclamped auf 1..200 (Default 50).
+     */
+    @GetMapping("/stats/log-snippets")
+    public List<Map<String, Object>> logSnippets(
+            @RequestParam(name = "limit", required = false, defaultValue = "50") int limit) {
+        int clamped = Math.max(1, Math.min(limit, 200));
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (LlmCallLog log : callLogRepo.findRecentWithSnippet(clamped)) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", log.getId());
+            row.put("service", log.getService());
+            row.put("lang", log.getLang());
+            row.put("outputChars", log.getOutputChars());
+            row.put("success", log.isSuccess());
+            row.put("model", log.getModel());
+            row.put("provider", log.getProvider());
+            row.put("category", log.getCategory());
+            row.put("promptSnippet", log.getPromptSnippet());
+            row.put("calledAt", log.getCalledAt() != null ? log.getCalledAt().toString() : null);
+            rows.add(row);
+        }
+        return rows;
     }
 
     /**

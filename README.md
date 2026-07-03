@@ -678,6 +678,197 @@ curl -X POST http://localhost:8090/api/generate \
 - Auto-Disable bei `MODEL_INVALID` (HTTP 404) — Reason wird in DB persistiert
 - Setup-canonical: docker-compose.yml + DataInitializer (kein setup.sh nötig — Web-App-Pattern, siehe `feedback_setup_canonical`)
 
+---
+
+## Pool × Area Architektur (ab v0.9.0)
+
+### Konzept
+
+Das Routing-Datenmodell wurde von einem einfachen `category`-Feld auf eine
+zweidimensionale **Pool × Area Matrix** umgestellt.
+
+```
+           AREA →   cloud     free      local
+POOL ↓             ───────   ───────   ───────
+  cloud            Opus 4.7    —         —
+  free               —       deepseek    —
+  local               —         —      qwen2.5
+```
+
+| Dimension | Bedeutung | Wer entscheidet |
+|-----------|-----------|-----------------|
+| **Pool**  | Technischer Kontext (cloud / free / local) | Nutzer — nie automatisch |
+| **Area**  | Fachliche Rolle (implement / content / cloud …) | Nutzer oder SemanticRouter |
+
+Jede Kombination `pool × area` kann einem eigenen Modell zugewiesen werden.
+Modelle in einer Kombination bilden die **Cascade** (Failover-Reihenfolge).
+
+### Datenmodell
+
+`AiModelConfig` hat jetzt drei neue Felder:
+
+| Feld | Typ | Beispiel |
+|------|-----|---------|
+| `pool` | String(50) | `cloud` |
+| `area` | String(50) | `implement` |
+| `orchestrator` | Boolean | `true` (nur Orchestrator-Area) |
+
+**Backward-Compat:** Das alte `category`-Feld bleibt erhalten. Beim Start leitet
+`PoolAreaMigrationRunner` automatisch `pool` + `area` aus `category` ab:
+- `implement-cloud` → pool=cloud, area=implement
+- `orchestrator-cloud` → pool=cloud, area=orchestrator, orchestrator=true
+- `cloud` → area=cloud (pool-benannte Catch-All)
+
+### Routing-Formate (loadCascade)
+
+`loadCascade(category)` versteht drei Formate:
+
+```
+"cloud:implement"   →  pool=cloud, area=implement  (neu, explizit)
+"implement-cloud"   →  pool=cloud, area=implement  (Legacy, letzer Bindestrich)
+"content"           →  category=content (altes System, edupro-Compat)
+```
+
+### OpenAI-Compat Endpoint
+
+Neuer Endpunkt `POST /v1/chat/completions` für ccr-Router-Integration:
+
+```bash
+curl -X POST http://localhost:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "cloud",
+    "messages": [{"role":"user","content":"Hallo!"}],
+    "stream": false
+  }'
+```
+
+Das `model`-Feld wird als Routing-Target interpretiert:
+
+| Wert | Bedeutung |
+|------|-----------|
+| `cloud` | Pool-Catch-All für supermodel=AUS, pool=cloud |
+| `orchestrator-cloud` | Orchestrator-Area für supermodel=AN, pool=cloud |
+| `implement-cloud` | Delegate-Area implement, pool=cloud |
+
+> **⚠ Tool-Calling-Status (wichtig):** Dieser Endpunkt ist heute **text-only** —
+> `extractPrompt()` nimmt nur den letzten User-Text, die Antwort enthaelt nur
+> `content`. Ein `tools`-Array im Request wird verworfen, `tool_calls` werden NIE
+> zurueckgegeben. Folge: **agentische Nutzung funktioniert NICHT durch die cascade** —
+> ein Tool-Client (Claude Code: Read/Edit/Bash) oder eine Orchestrator-Delegation
+> (supermodel=AN, Delegation IST ein Tool-Call) verliert hier die Tool-Calls und
+> degradiert zum Chatbot. Nur reine Textnutzung (z.B. EduPro Content/i18n) ist
+> unbetroffen.
+>
+> **Soll (geplant) — Tool-Passthrough:** `tools` durchreichen, `tool_calls`
+> zurueckgeben, Ollama via `/api/chat`, provider-uebergreifender `ToolCallNormalizer`,
+> Failover mit Message-History. Voll-Doku, Status & Umsetzungsplan:
+> **`claude-code-switcher/docs/ARCHITEKTUR-tool-calling-pfade.md`**.
+
+### supermodel=AUS vs supermodel=AN
+
+#### SWITCHER supermodel=AUS
+
+```
+POOLS: cloud · free · local
+AREAS: cloud "Allgemein, Fallback"
+       free  "Allgemein, Fallback"
+       local "Allgemein, Fallback"
+
+MODELLE: cloud × cloud → Opus 4.7
+         free  × free  → deepseek-free
+         local × local → qwen2.5-coder
+
+→ ccr-Router → llm-cascade (model="cloud" / "free" / "local")
+→ kein Semantic-Routing — jeder Pool hat eine eigene Catch-All-Area
+```
+
+#### SWITCHER supermodel=AN
+
+```
+POOLS: cloud · free · local
+AREAS: implement · review · research · dispatch · orchestrator ★
+
+MODELLE: cloud × orchestrator → Opus 4.8   (gepinnt, isOrchestrator=true)
+         cloud × implement   → deepseek
+         cloud × review      → gpt-4o-mini
+         …
+
+→ ccr-Router → llm-cascade (model="orchestrator-cloud")
+→ Orchestrator delegiert an andere Areas
+→ Failover in llm-cascade, kein Session-Neustart
+```
+
+#### EDUPRO supermodel=AUS
+
+```
+POOLS: cloud · free  (kein local)
+AREAS: content "Lernmaterial, Prüfungen, Chat"
+       dev     "Code-Analyse, PR-Review"
+       utility "i18n, Audits, Verifier"
+       general "Catch-All, provider-divers"
+
+MODELLE: cloud × content → deepseek-chat
+         cloud × dev     → deepseek-reasoner
+         cloud × utility → gemini-flash-lite
+         cloud × general → gemini-flash
+         …
+
+→ POST /api/generate mit purpose="..." → SemanticCategoryRouter
+→ Router wählt Area anhand CategoryMeta.descriptions
+→ KEIN Orchestrator-Area bei supermodel=AUS
+```
+
+#### EDUPRO supermodel=AN (zukünftig)
+
+```
+POOLS: cloud · free
+AREAS: implement · review · research · dispatch · orchestrator ★
+       (content/dev/utility/general verschwinden aus UI)
+
+MODELLE: gleiche Struktur wie SWITCHER supermodel=AN
+→ Orchestrator-Area isOrchestrator=true gepinnt
+```
+
+### SemanticCategoryRouter Pool-Scope
+
+Neues `resolve(purpose, pool)` für Pool-gebundenes Semantic-Routing:
+
+```java
+// Nur Areas die im Pool "cloud" konfiguriert sind werden vorgeschlagen
+String area = router.resolve("übersetze i18n-Keys ins Englische", "cloud");
+// → "utility" (wenn cloud×utility konfiguriert ist und CategoryMeta description passt)
+```
+
+Fallback: wenn keine passende Area gefunden → Pool selbst als Catch-All.
+
+### ccr-Router Integration (Switcher)
+
+Der ccr-Router sendet jetzt alle Requests an llm-cascade statt direkt an Provider:
+
+```json
+{
+  "Providers": [
+    {
+      "name": "llm-cascade",
+      "api_base_url": "http://llm-cascade:8090/v1/chat/completions",
+      "api_key": "sk-llm-cascade",
+      "transformer": { "use": ["openrouter"] }
+    }
+  ],
+  "Router": {
+    "default": "llm-cascade,cloud",
+    "background": "llm-cascade,cloud"
+  }
+}
+```
+
+Bei supermodel=AN: `"default": "llm-cascade,orchestrator-cloud"`.
+
+**Vorteil:** Failover passiert transparent in llm-cascade ohne Session-Neustart.
+
+---
+
 ## Lizenz
 
 Intern, 4dataclub.

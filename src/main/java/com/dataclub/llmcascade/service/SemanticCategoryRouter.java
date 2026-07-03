@@ -1,6 +1,8 @@
 package com.dataclub.llmcascade.service;
 
+import com.dataclub.llmcascade.model.AiModelConfig;
 import com.dataclub.llmcascade.model.CategoryMeta;
+import com.dataclub.llmcascade.repository.AiModelConfigRepository;
 import com.dataclub.llmcascade.repository.CategoryMetaRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
@@ -64,7 +66,18 @@ public class SemanticCategoryRouter {
     /** Routing nutzt selbst diese Kategorie fuer den Decision-Call — billig + schnell. */
     private static final String ROUTING_LLM_CATEGORY = "utility";
 
+    /**
+     * Areas die zum supermodel=AN-Cascade-Set gehoeren. Der Router filtert sie
+     * bei bare {@code model={pool}} aus den Kandidaten, weil sie ausschliesslich
+     * durch expliziten Kategorie-Namen (z.B. {@code model=implement-cloud})
+     * erreichbar sein sollen. Damit bleibt die Trennung AUS ↔ AN scharf.
+     */
+    private static final Set<String> ROLE_AREAS = Set.of(
+        "orchestrator", "implement", "review", "research", "dispatch"
+    );
+
     @Autowired private CategoryMetaRepository categoryMetaRepo;
+    @Autowired private AiModelConfigRepository modelRepo;
 
     /**
      * {@link LlmCascadeService} ist eine Lazy-Abhaengigkeit weil Router von ihr
@@ -126,23 +139,27 @@ public class SemanticCategoryRouter {
      * gemapt.
      */
     private String resolveViaLlm(String purpose) {
-        // 1. Verfuegbare Kategorien laden (inkl. description aus category_meta)
         List<CategoryMeta> metas = new ArrayList<>(categoryMetaRepo.findAll());
         if (metas.isEmpty()) {
-            // Leere category_meta-Tabelle — Router kann nichts vorschlagen, fallback.
             return FALLBACK_CATEGORY;
         }
-
-        // Nur Kategorien mit description sind sinnvoll routbar — sonst weiss der LLM nichts.
         List<CategoryMeta> withDesc = metas.stream()
             .filter(m -> m.getDescription() != null && !m.getDescription().isBlank())
             .toList();
         if (withDesc.isEmpty()) {
-            // Kategorien existieren aber ohne description-Texte — fallback.
             return FALLBACK_CATEGORY;
         }
+        return resolveViaLlmWithMetas(purpose, withDesc, metas);
+    }
 
-        // 2. Prompt bauen — Deutsch + Englisch gemischt damit es robust ist (LLM-Sprachpraferenz)
+    /**
+     * Gemeinsame LLM-Routing-Engine. Nimmt eine pre-gefilterte Liste von
+     * CategoryMetas (fuer Pool-Scope) und die vollstaendige Liste (fuer Validierung).
+     */
+    private String resolveViaLlmWithMetas(String purpose,
+                                           List<CategoryMeta> withDesc,
+                                           List<CategoryMeta> allMetas) {
+        // Prompt bauen — Deutsch + Englisch gemischt damit es robust ist
         StringBuilder sb = new StringBuilder();
         sb.append("Du bist ein Routing-Klassifikator. Waehle EINE Kategorie die am besten zum gegebenen Task passt.\n\n");
         sb.append("Verfuegbare Kategorien:\n");
@@ -153,14 +170,13 @@ public class SemanticCategoryRouter {
         sb.append("Antworte AUSSCHLIESSLICH mit dem name-Identifier der besten Kategorie. ");
         sb.append("Keine Erklaerung, keine Punktion, nur der Name. Falls keine wirklich passt: \"general\".");
 
-        // 3. Routing-LLM-Call — eigene Cascade mit category="utility"
         try {
             GenerateOptions opts = new GenerateOptions(
-                "__routing__",                          // service-Tag fuer Logging
+                "__routing__",
                 null, GenerateOptions.Mode.CASCADE,
                 true, null,
                 ROUTING_LLM_CATEGORY,
-                null                                    // kein nested purpose — wir SIND der Router
+                null
             );
             GenerateResult result = cascade.generate(sb.toString(), opts);
             String raw = result.text();
@@ -169,20 +185,15 @@ public class SemanticCategoryRouter {
                 return FALLBACK_CATEGORY;
             }
 
-            // 4. Parse: lowercase, trim, nimm erste Zeile, strip Punctuation
             String cleaned = raw.trim().toLowerCase()
-                .split("\\s|\\n", 2)[0]              // erstes Wort
-                .replaceAll("[^a-z0-9_-]", "");      // nur erlaubte Zeichen
+                .split("\\s|\\n", 2)[0]
+                .replaceAll("[^a-z0-9_-]", "");
 
-            // 5. Validate gegen verfuegbare Kategorien
-            for (CategoryMeta m : metas) {
+            for (CategoryMeta m : allMetas) {
                 if (m.getName().equals(cleaned)) return cleaned;
             }
-
-            // Manchmal gibt der LLM "general" obwohl nicht in der Liste — explizit erlauben
             if ("general".equals(cleaned)) return "general";
 
-            // Sonst: ungueltige Antwort, fallback
             routingFailures.incrementAndGet();
             return FALLBACK_CATEGORY;
         } catch (RuntimeException e) {
@@ -231,6 +242,77 @@ public class SemanticCategoryRouter {
         out.put("misses", cacheMisses.get());
         out.put("failures", routingFailures.get());
         return out;
+    }
+
+    /**
+     * Pool-scoped Routing: loest purpose auf eine Area auf, aber nur unter
+     * Areas die im angegebenen Pool konfiguriert sind.
+     *
+     * Unterschied zu {@link #resolve(String)}: filtert CategoryMeta auf Areas
+     * fuer die es auch ein Modell mit pool=X gibt. Fallback ist der Pool selbst
+     * als Catch-All-Area (z.B. pool=cloud → area=cloud).
+     *
+     * @param purpose Freier Task-Beschreibungs-String.
+     * @param pool    Pool-Identifier (z.B. "cloud", "free", "local").
+     * @return Area-Identifier oder pool als Fallback.
+     */
+    public synchronized String resolve(String purpose, String pool) {
+        if (purpose == null || purpose.isBlank()) {
+            return pool != null ? pool : FALLBACK_CATEGORY;
+        }
+        if (pool == null || pool.isBlank()) {
+            return resolve(purpose);
+        }
+
+        // Distinct areas im gewuenschten Pool aus ai_model_config laden
+        List<AiModelConfig> poolModels = modelRepo.findByEnabledTrueAndAutoDisabledFalseOrderByOrderIdxAsc()
+            .stream()
+            .filter(m -> pool.equalsIgnoreCase(m.getPool()) && m.getArea() != null && !m.getArea().isBlank())
+            .toList();
+
+        if (poolModels.isEmpty()) {
+            return pool; // catch-all fallback
+        }
+
+        java.util.Set<String> poolAreas = new java.util.LinkedHashSet<>();
+        for (AiModelConfig m : poolModels) {
+            String area = m.getArea().toLowerCase();
+            // Rollen-Compounds (supermodel=AN) sind bei bare model={pool}
+            // unsichtbar. Nur AUS-Cascaden sind waehlbar.
+            if (ROLE_AREAS.contains(area)) continue;
+            poolAreas.add(area);
+        }
+
+        // Nur CategoryMetas fuer Areas im Pool beruecksichtigen
+        List<CategoryMeta> metas = new ArrayList<>(categoryMetaRepo.findAll());
+        List<CategoryMeta> relevant = metas.stream()
+            .filter(m -> poolAreas.contains(m.getName().toLowerCase())
+                && m.getDescription() != null && !m.getDescription().isBlank())
+            .toList();
+
+        if (relevant.isEmpty()) {
+            return pool; // kein beschreibungsbasiertes Routing moeglich
+        }
+
+        // Cache-Key enthaelt Pool um Kollisionen zu vermeiden
+        String purposeWithPool = pool + ":" + purpose;
+        String key = hashPurpose(purposeWithPool);
+        long now = java.time.Instant.now().toEpochMilli();
+
+        CachedDecision cached = cache.get(key);
+        if (cached != null && (now - cached.decidedAtMillis()) < TTL_MS) {
+            cacheHits.incrementAndGet();
+            return cached.category();
+        }
+        cacheMisses.incrementAndGet();
+
+        String resolved = resolveViaLlmWithMetas(purpose, relevant, metas);
+        // Validierung: nur Areas die auch im Pool vorhanden sind
+        if (!poolAreas.contains(resolved)) {
+            resolved = pool; // catch-all fallback
+        }
+        cache.put(key, new CachedDecision(resolved, now, purpose));
+        return resolved;
     }
 
     /**

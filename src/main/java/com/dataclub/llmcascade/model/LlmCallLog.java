@@ -49,6 +49,10 @@ public class LlmCallLog {
     @Column(length = 32)
     private String provider;
 
+    /** Cascade-Kategorie des Calls (z.B. "implement-cloud", "review-local"). */
+    @Column(length = 64)
+    private String category;
+
     /** Optionaler, gekuerzter Ausschnitt des Prompts (max. 160 Zeichen) — NUR fuer
      *  Debug/Live-Watch. Datenschutz: wird ausschliesslich befuellt wenn das Setting
      *  {@code logPromptSnippet} explizit AN ist (Default AUS). Sonst {@code null},

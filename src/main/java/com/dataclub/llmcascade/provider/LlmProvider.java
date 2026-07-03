@@ -41,6 +41,59 @@ public interface LlmProvider {
     }
 
     /**
+     * Route A — Tool-Passthrough. Tool-faehiger Chat-Aufruf: nimmt die volle
+     * messages-Liste + optionale tools/tool_choice und gibt content PLUS
+     * tool_calls zurueck.
+     *
+     * Default-Impl ist rueckwaertskompatibel: extrahiert den letzten user-Text
+     * und ruft das normale text-only {@link #generate}, gibt ChatResult OHNE
+     * tool_calls zurueck. Provider die Tool-Calling koennen (OpenAI-kompatibel,
+     * Ollama via /v1) ueberschreiben das.
+     *
+     * @param messages   OpenAI-Format Message-Liste ({role, content, ...})
+     * @param tools      OpenAI-Format Tool-Definitionen, oder null
+     * @param toolChoice "auto" | "none" | {...}, oder null
+     */
+    default com.dataclub.llmcascade.service.ChatResult generateChat(
+            java.util.List<java.util.Map<String, Object>> messages,
+            java.util.List<java.util.Map<String, Object>> tools,
+            Object toolChoice,
+            String modelId, String apiKey, String baseUrlOverride) {
+        String prompt = lastUserText(messages);
+        String text = generate(prompt, modelId, apiKey, baseUrlOverride);
+        return new com.dataclub.llmcascade.service.ChatResult(text, null, "stop", null);
+    }
+
+    /** Hilfsfunktion: letzten user-content aus einer OpenAI-Message-Liste ziehen. */
+    static String lastUserText(java.util.List<java.util.Map<String, Object>> messages) {
+        if (messages == null) {
+            return "";
+        }
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            java.util.Map<String, Object> m = messages.get(i);
+            if (m == null) {
+                continue;
+            }
+            if ("user".equals(m.get("role"))) {
+                Object c = m.get("content");
+                if (c instanceof String s) {
+                    return s;
+                }
+                if (c instanceof java.util.List<?> parts) {
+                    StringBuilder sb = new StringBuilder();
+                    for (Object p : parts) {
+                        if (p instanceof java.util.Map<?, ?> pm && pm.get("text") instanceof String t) {
+                            sb.append(t);
+                        }
+                    }
+                    return sb.toString();
+                }
+            }
+        }
+        return "";
+    }
+
+    /**
      * Smoke-Test-Variante: erzeugt eine minimale Antwort (max 20 Tokens).
      * Wichtig fuer lokale Modelle wie Ollama, die ohne Token-Limit auf CPU
      * mehrere Minuten benoetigen koennen.

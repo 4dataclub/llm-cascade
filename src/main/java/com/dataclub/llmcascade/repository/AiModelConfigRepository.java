@@ -30,6 +30,17 @@ public interface AiModelConfigRepository extends JpaRepository<AiModelConfig, Lo
            "ORDER BY m.orderIdx ASC")
     List<AiModelConfig> findCascadeByCategoryIn(@Param("categories") List<String> categories);
 
+    /**
+     * Pool x Area Routing: filtert auf genau diesen Pool + diese Area.
+     * Wird vom OpenAiCompatController und von loadCascade(pool,area) genutzt.
+     */
+    @Query("SELECT m FROM AiModelConfig m " +
+           "WHERE m.enabled = true AND m.autoDisabled = false " +
+           "AND m.pool = :pool AND m.area = :area " +
+           "ORDER BY m.orderIdx ASC")
+    List<AiModelConfig> findCascadeByPoolAndArea(@Param("pool") String pool,
+                                                  @Param("area") String area);
+
     /** Alle (auch deaktivierte/auto-disabled), fuer Admin-UI sortiert. */
     List<AiModelConfig> findAllByOrderByOrderIdxAsc();
 
