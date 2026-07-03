@@ -30,7 +30,9 @@ public class OpenAiCompatProvider implements LlmProvider {
 
     private final String baseUrl;
     private final boolean requiresApiKey;
-    private final RestTemplate restTemplate = new RestTemplate();
+    // package-private: erlaubt Tests, via MockRestServiceServer HTTP-/Connection-
+    // Fehler zu simulieren (Connection-refused → Failover-Verhalten).
+    final RestTemplate restTemplate = new RestTemplate();
 
     public OpenAiCompatProvider(String baseUrl) {
         this(baseUrl, true);
@@ -119,6 +121,12 @@ public class OpenAiCompatProvider implements LlmProvider {
             resp = restTemplate.postForEntity(effBase + "/chat/completions", req, Map.class);
         } catch (HttpStatusCodeException ex) {
             throw mapHttpError(ex);
+        } catch (org.springframework.web.client.ResourceAccessException ex) {
+            // Server nicht erreichbar (Connection refused / Timeout / DNS) — z.B.
+            // zugeordneter Inferenz-Server aus oder Engine nicht bereit. Als
+            // SERVER_ERROR behandeln → Cooldown + Failover zum naechsten Modell.
+            throw new LlmException(LlmException.Type.SERVER_ERROR, 503, 0L, ex.getMessage(),
+                "connection failed: " + ex.getMessage(), ex);
         }
         return extractText(resp);
     }
@@ -166,6 +174,12 @@ public class OpenAiCompatProvider implements LlmProvider {
             resp = restTemplate.postForEntity(effBase + "/chat/completions", req, Map.class);
         } catch (HttpStatusCodeException ex) {
             throw mapHttpError(ex);
+        } catch (org.springframework.web.client.ResourceAccessException ex) {
+            // Server nicht erreichbar (Connection refused / Timeout / DNS) — z.B.
+            // zugeordneter Inferenz-Server aus oder Engine nicht bereit. Als
+            // SERVER_ERROR behandeln → Cooldown + Failover zum naechsten Modell.
+            throw new LlmException(LlmException.Type.SERVER_ERROR, 503, 0L, ex.getMessage(),
+                "connection failed: " + ex.getMessage(), ex);
         }
 
         Map<?, ?> respBody = resp.getBody();

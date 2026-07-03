@@ -56,6 +56,11 @@ public class GeminiProvider implements LlmProvider {
             response = restTemplate.postForEntity(url, request, Map.class);
         } catch (HttpStatusCodeException ex) {
             throw mapHttpError(ex);
+        } catch (org.springframework.web.client.ResourceAccessException ex) {
+            // Server nicht erreichbar (Connection refused / Timeout / DNS). Als
+            // SERVER_ERROR behandeln → Cooldown + Failover zum naechsten Modell.
+            throw new LlmException(LlmException.Type.SERVER_ERROR, 503, 0L, ex.getMessage(),
+                "connection failed: " + ex.getMessage(), ex);
         }
 
         return extractText(response);
@@ -138,6 +143,11 @@ public class GeminiProvider implements LlmProvider {
             response = restTemplate.postForEntity(url, request, Map.class);
         } catch (HttpStatusCodeException ex) {
             throw mapHttpError(ex);
+        } catch (org.springframework.web.client.ResourceAccessException ex) {
+            // Server nicht erreichbar (Connection refused / Timeout / DNS). Als
+            // SERVER_ERROR behandeln → Cooldown + Failover zum naechsten Modell.
+            throw new LlmException(LlmException.Type.SERVER_ERROR, 503, 0L, ex.getMessage(),
+                "connection failed: " + ex.getMessage(), ex);
         }
 
         Map<?, ?> respBody = response.getBody();
