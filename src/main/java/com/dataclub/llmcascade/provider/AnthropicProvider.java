@@ -57,6 +57,11 @@ public class AnthropicProvider implements LlmProvider {
             resp = restTemplate.postForEntity(URL, req, Map.class);
         } catch (HttpStatusCodeException ex) {
             throw mapHttpError(ex);
+        } catch (org.springframework.web.client.ResourceAccessException ex) {
+            // Server nicht erreichbar (Connection refused / Timeout / DNS). Als
+            // SERVER_ERROR behandeln → Cooldown + Failover zum naechsten Modell.
+            throw new LlmException(LlmException.Type.SERVER_ERROR, 503, 0L, ex.getMessage(),
+                "connection failed: " + ex.getMessage(), ex);
         }
         return extractText(resp);
     }
@@ -146,6 +151,11 @@ public class AnthropicProvider implements LlmProvider {
             resp = restTemplate.postForEntity(URL, req, Map.class);
         } catch (HttpStatusCodeException ex) {
             throw mapHttpError(ex);
+        } catch (org.springframework.web.client.ResourceAccessException ex) {
+            // Server nicht erreichbar (Connection refused / Timeout / DNS). Als
+            // SERVER_ERROR behandeln → Cooldown + Failover zum naechsten Modell.
+            throw new LlmException(LlmException.Type.SERVER_ERROR, 503, 0L, ex.getMessage(),
+                "connection failed: " + ex.getMessage(), ex);
         }
 
         Map<?, ?> respBody = resp.getBody();
