@@ -471,6 +471,28 @@ public class ApiController {
     }
 
     /**
+     * Reset auf Werkseinstellungen: setzt die kanonischen Descriptions
+     * (aus {@link com.dataclub.llmcascade.service.DefaultCategoryDescriptions})
+     * fuer alle Kern-Kategorien (utility, content, ...). User-defined Kategorien
+     * ausserhalb der Default-Liste bleiben unangetastet. Leert danach den
+     * Routing-Cache, damit stale-Entscheidungen nicht auf alten Beschreibungen
+     * haengen bleiben.
+     */
+    @PostMapping("/categories/reset-descriptions")
+    public ResponseEntity<?> resetCategoryDescriptions() {
+        com.dataclub.llmcascade.service.DefaultCategoryDescriptions.ApplyResult r =
+            com.dataclub.llmcascade.service.DefaultCategoryDescriptions.applyTo(categoryMetaRepo);
+        router.clearCache();
+        return ResponseEntity.ok(Map.of(
+            "ok", true,
+            "created", r.created(),
+            "updated", r.updated(),
+            "unchanged", r.unchanged(),
+            "total", r.total()
+        ));
+    }
+
+    /**
      * Loescht die Metadaten-Zeile (NICHT die Kategorie selbst — die lebt
      * implizit weiter, solange ein Modell sie nutzt). Nach Delete bekommt
      * die Kategorie in der UI wieder leere Felder + capitalized Fallback.

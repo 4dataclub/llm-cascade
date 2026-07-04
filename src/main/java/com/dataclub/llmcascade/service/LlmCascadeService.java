@@ -294,7 +294,7 @@ public class LlmCascadeService {
             try {
                 String result = provider.generate(prompt, cfg.getModelId(), apiKey, baseUrl);
                 setActiveIdxFor(cascadeName, i);
-                log(true, result == null ? 0 : result.length(), cfg, opts);
+                log(true, result == null ? 0 : result.length(), cfg, opts, result);
                 return new GenerateResult(result, stateKey);
 
             } catch (LlmException ex) {
@@ -309,7 +309,7 @@ public class LlmCascadeService {
                         try {
                             String result = provider.generate(prompt, cfg.getModelId(), apiKey, baseUrl);
                             setActiveIdxFor(cascadeName, i);
-                            log(true, result == null ? 0 : result.length(), cfg, opts);
+                            log(true, result == null ? 0 : result.length(), cfg, opts, result);
                             return new GenerateResult(result, stateKey);
                         } catch (LlmException second) {
                             if (opts.cooldown()) {
@@ -414,15 +414,18 @@ public class LlmCascadeService {
                 setActiveIdxFor(cascadeName, i);
                 System.err.println("[CHAT] ok " + stateKey
                     + (r.hasToolCalls() ? " (tool_calls=" + r.toolCalls().size() + ")" : ""));
+                logChat(true, r.content() == null ? 0 : r.content().length(), cfg, cascadeName);
                 return new ChatResult(r.content(), r.toolCalls(), r.finishReason(), stateKey);
             } catch (LlmException ex) {
                 long cdMs = DEFAULT_503_COOLDOWN_MS;
                 cooldownUntil.put(stateKey, System.currentTimeMillis() + cdMs);
                 lastError = new RuntimeException("[CHAT] " + stateKey + " " + ex.getType() + ": " + ex.getMessage(), ex);
                 System.err.println("[CHAT] " + stateKey + " Fehler (" + ex.getType() + ") → failover zum naechsten");
+                logChat(false, 0, cfg, cascadeName);
             } catch (Exception other) {
                 lastError = new RuntimeException("[CHAT] " + stateKey + " unexpected: " + other.getMessage(), other);
                 System.err.println("[CHAT] " + stateKey + " unexpected: " + other.getMessage());
+                logChat(false, 0, cfg, cascadeName);
             }
         }
         throw new RuntimeException("Chat-Cascade exhausted — letztes Modell "
@@ -455,7 +458,7 @@ public class LlmCascadeService {
 
             try {
                 String result = provider.generate(prompt, cfg.getModelId(), apiKey, baseUrl);
-                log(true, result == null ? 0 : result.length(), cfg, opts);
+                log(true, result == null ? 0 : result.length(), cfg, opts, result);
                 return new GenerateResult(result, stateKey);
             } catch (LlmException ex) {
                 if (opts.cooldown() && (ex.getType() == LlmException.Type.QUOTA_EXHAUSTED
@@ -502,7 +505,7 @@ public class LlmCascadeService {
         String baseUrl = serverResolver.resolveEffectiveBaseUrl(cfg);
         try {
             String result = provider.generate(prompt, cfg.getModelId(), apiKey, baseUrl);
-            log(true, result == null ? 0 : result.length(), cfg, opts);
+            log(true, result == null ? 0 : result.length(), cfg, opts, result);
             return new GenerateResult(result, stateKey);
         } catch (LlmException ex) {
             log(false, 0, cfg, opts);
@@ -604,6 +607,10 @@ public class LlmCascadeService {
     }
 
     private void log(boolean success, int outputChars, AiModelConfig cfg, GenerateOptions opts) {
+        log(success, outputChars, cfg, opts, null);
+    }
+
+    private void log(boolean success, int outputChars, AiModelConfig cfg, GenerateOptions opts, String outputText) {
         if (callLog == null) return;
         // opts.service/opts.lang gewinnen wenn gesetzt, sonst Fallback auf ThreadLocal-Context
         String[] ctx = CALL_CONTEXT.get();
@@ -619,6 +626,17 @@ public class LlmCascadeService {
                 promptSnippet = truncate(CURRENT_PROMPT.get(), 160);
             }
         } catch (Exception ignored) { /* Setting nicht lesbar -> kein Snippet */ }
+        // Output NUR beim Klassifikator-Call speichern (kurzer Kategorie-String,
+        // kein Nutzer-Inhalt). Chat-Antworten bleiben aus Datenschutzgruenden null.
+        // Analog zu SemanticCategoryRouter: erste Token, nur alphanumerisch — damit
+        // rohes LLM-Geschwaetz nicht das output-Feld verstopft.
+        String outputForDb = null;
+        if ("__routing__".equals(service) && outputText != null) {
+            String c = outputText.trim().toLowerCase()
+                .split("\\s|\\n", 2)[0]
+                .replaceAll("[^a-z0-9_-]", "");
+            if (!c.isEmpty()) outputForDb = truncate(c, 32);
+        }
         try {
             callLog.save(LlmCallLog.builder()
                 .service(service)
@@ -628,6 +646,29 @@ public class LlmCascadeService {
                 .model(cfg == null ? null : cfg.getModelId())
                 .provider(cfg == null ? null : cfg.getProvider())
                 .category(opts != null ? opts.category() : null)
+                .promptSnippet(promptSnippet)
+                .output(outputForDb)
+                .build());
+        } catch (Exception ignored) {}
+    }
+
+    private void logChat(boolean success, int outputChars, AiModelConfig cfg, String category) {
+        if (callLog == null) return;
+        String promptSnippet = null;
+        try {
+            if (settings != null && settings.getBoolean(SettingsService.LOG_PROMPT_SNIPPET)) {
+                promptSnippet = truncate(CURRENT_PROMPT.get(), 160);
+            }
+        } catch (Exception ignored) {}
+        try {
+            callLog.save(LlmCallLog.builder()
+                .service("chat")
+                .lang(null)
+                .outputChars(outputChars)
+                .success(success)
+                .model(cfg == null ? null : cfg.getModelId())
+                .provider(cfg == null ? null : cfg.getProvider())
+                .category(category)
                 .promptSnippet(promptSnippet)
                 .build());
         } catch (Exception ignored) {}

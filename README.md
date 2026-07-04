@@ -56,6 +56,7 @@ der konfigurierten Liste raus und liefert die Antwort.
 | `openrouter` | OpenRouter (`openrouter.ai/api/v1`) | `deepseek/deepseek-chat-v3.1`, `meta-llama/llama-3.3-70b-instruct:free` |
 | `deepseek` | DeepSeek direkt (`api.deepseek.com/v1`) | `deepseek-chat`, `deepseek-coder` |
 | `anthropic` | Anthropic Messages API | `claude-sonnet-4-6`, `claude-opus-4-7`, `claude-haiku-4-5-20251001` |
+| `ollama` | Lokales Ollama (`${OLLAMA_BASE_URL}`, OpenAI-kompatibel) | `llama3.2:3b`, `qwen2.5-coder:7b`, `gemma3:4b` |
 | `openai_compat` | Catch-all für andere OpenAI-API-kompatible Endpoints | beliebige selbst-gehostete LLMs |
 
 Neue Provider hinzufügen = neue `@Component`-Klasse in `provider/` die
@@ -258,7 +259,7 @@ llm-cascade durchläuft die Kategorien sortiert nach `category_meta.orderIdx`
 
 **Failover ≠ Auto-Escalation:**
 
-| | Failover (heute) | Auto-Escalation (v0.7.0) |
+| | Failover | Auto-Escalation |
 |---|---|---|
 | **Trigger** | HTTP-Fehler (429, 503, Timeout) | Validator-Fail (Schema, Quality) |
 | **Sprung** | Nächstes Modell, selbe Kategorie | Nächste Kategorie nach orderIdx |
@@ -518,41 +519,26 @@ POST /api/generate
 
 ## Stats-Tracking — wie verfolge ich Routing-Entscheidungen?
 
-**Datenbank-Erweiterung (v0.7.0):** `llm_call_log` bekommt 6 neue Felder.
+**Was wirklich pro Call in `llm_call_log` gespeichert wird:** `service`, `lang`,
+`provider`, `model`, `category`, `success`, `outputChars`, `calledAt` — plus zwei
+bewusst optionale Felder:
 
-| Feld | Typ | Zweck |
+| Feld | wann befüllt | warum optional |
 |---|---|---|
-| `routedVia` | ENUM | `'category'` \| `'purpose'` \| `'escalate'` |
-| `requestedTier` | INT | Was der Caller wollte (orderIdx) |
-| `chosenTier` | INT | Was tatsächlich verwendet wurde |
-| `escalationCount` | INT | Wie oft eskaliert (0 = direkt OK) |
-| `purposeHash` | VARCHAR | Cache-Key für Semantic Routing |
-| `validatorPassed` | BOOLEAN | JSON+Schema+Quality ok? |
-| `validatorReason` | VARCHAR | Wenn fail, warum |
+| `promptSnippet` | nur wenn Setting `logPromptSnippet=true` | Datenschutz — Nutzer-Prompts sonst nicht in der DB |
+| `output` | nur bei `service="__routing__"` | speichert die vom Router gewählte Kategorie (max. 32 Zeichen), nie Chat-Inhalte |
 
-**Drei neue Charts im Stats-Tab:**
+**Auswertung über die Stats-Endpunkte** (das Admin-UI rendert daraus Charts):
 
 ```
-📊 Tier-Verteilung (Lokal-Quote)
-   Tier 0:  ████████████████░░░  73%   ← gut: lokal-first funktioniert
-   Tier 1:  ███████░░░░░░░░░░░  21%
-   Tier 2:  ██░░░░░░░░░░░░░░░░   6%
-
-📊 Routing-Methode
-   category (legacy):    18%
-   purpose (Semantic):   62%
-   escalate (Auto):      20%
-
-📊 Escalation-Rate
-   Direkt OK:        89%   ← Validator passed bei erster Wahl
-   1× eskaliert:      9%
-   Alle exhausted:  0.2%   ← critical
+GET /api/stats/calls                 letzte 50 Calls
+GET /api/stats/quality               Erfolgsquote + Score-Tier je Modell
+GET /api/stats/performance           Latenz + Durchsatz je provider:model
+GET /api/stats/trend                 Calls/Tag (Erfolg vs. Fehler)
+GET /api/stats/totals                Aggregate (24h / 7d / 30d)
+GET /api/stats/failover[-breakdown]  Failover-Events + Aufschlüsselung
+GET /api/stats/log-snippets          Prompt-Snippet-Feed (nur wenn Logging AN)
 ```
-
-**Use für Konzept-Validierung:**
-- Tier-0-Quote > 70% bedeutet: lokal-first funktioniert
-- Wenn Tier 2 > 30%: descriptions oder orderIdx prüfen
-- Drill-down via `service`-Tag zeigt welcher Caller am meisten eskaliert
 
 **Datenschutz-Schalter `logPromptSnippet` (Default AUS):** pro Call landet ein
 gekürzter Prompt-Ausschnitt (max. 160 Zeichen) in `llm_call_log.prompt_snippet`
@@ -568,13 +554,13 @@ curl -X POST http://localhost:8090/api/settings/logPromptSnippet -d 'false'  # A
 `GET /api/stats/calls` liefert das Feld als `promptSnippet` mit aus (von den
 Watch-Skripten genutzt).
 
-**SQL-Beispiel:**
+**SQL-Beispiel (Erfolgsquote je Modell, letzte 24 h):**
 ```sql
-SELECT service, COUNT(*) AS total,
-       ROUND(100.0 * SUM(CASE WHEN chosenTier=0 THEN 1 ELSE 0 END) / COUNT(*), 1) AS local_pct
+SELECT provider, model, COUNT(*) AS total,
+       ROUND(100.0 * SUM(CASE WHEN success THEN 1 ELSE 0 END) / COUNT(*), 1) AS success_pct
 FROM llm_call_log
-WHERE calledAt > NOW() - INTERVAL '24 hours' AND routedVia='escalate'
-GROUP BY service
+WHERE called_at > NOW() - INTERVAL '24 hours'
+GROUP BY provider, model
 ORDER BY total DESC;
 ```
 
@@ -871,4 +857,4 @@ Bei supermodel=AN: `"default": "llm-cascade,orchestrator-cloud"`.
 
 ## Lizenz
 
-Intern, 4dataclub.
+Open Source · 4dataclub.

@@ -60,6 +60,13 @@ public class LlmCallLog {
     @Column(name = "prompt_snippet", length = 160)
     private String promptSnippet;
 
+    /** Kurzer Output-Ausschnitt (max. 32 Zeichen) — aktuell NUR bei
+     *  {@code service="__routing__"} befuellt: die vom Klassifikator gewaehlte
+     *  Kategorie (z.B. "dev", "utility"). Fuer echte Chat-Antworten bleibt null
+     *  (Datenschutz — Nutzer-Inhalte werden nicht persistiert). */
+    @Column(name = "output", length = 32)
+    private String output;
+
     @Column(name = "called_at", nullable = false)
     private LocalDateTime calledAt;
 
