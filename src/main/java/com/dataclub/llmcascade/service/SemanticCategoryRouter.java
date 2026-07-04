@@ -167,8 +167,10 @@ public class SemanticCategoryRouter {
             sb.append("- ").append(m.getName()).append(": ").append(m.getDescription()).append("\n");
         }
         sb.append("\nTask: ").append(purpose).append("\n\n");
-        sb.append("Antworte AUSSCHLIESSLICH mit dem name-Identifier der besten Kategorie. ");
-        sb.append("Keine Erklaerung, keine Punktion, nur der Name. Falls keine wirklich passt: \"general\".");
+        sb.append("Antworte mit GENAU EINEM Wort — nur der name-Identifier einer einzigen Kategorie. ");
+        sb.append("KEINE Liste, KEINE Zeilenumbrueche, KEIN Punkt am Ende, KEINE Erklaerung. ");
+        sb.append("Beispiel-Antwort: dev\n");
+        sb.append("Falls keine Kategorie wirklich passt, antworte: general");
 
         try {
             GenerateOptions opts = new GenerateOptions(
