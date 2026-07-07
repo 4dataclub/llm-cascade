@@ -124,7 +124,11 @@ public class GeminiProvider implements LlmProvider {
                 Map<String, Object> d = new java.util.LinkedHashMap<>();
                 d.put("name", fn.get("name"));
                 d.put("description", fn.get("description"));
-                d.put("parameters", fn.getOrDefault("parameters", Map.of("type", "object")));
+                // Gemini akzeptiert nur einen OpenAPI-Schema-Subset -> Felder wie
+                // "$schema"/"additionalProperties" werden mit 400 abgelehnt. Vorm
+                // Senden rekursiv saeubern (Claude Code schickt reiche JSON-Schemas).
+                Object params = fn.getOrDefault("parameters", Map.of("type", "object"));
+                d.put("parameters", sanitizeSchema(params));
                 decls.add(d);
             }
             body.put("tools", List.of(Map.of("functionDeclarations", decls)));
@@ -192,6 +196,54 @@ public class GeminiProvider implements LlmProvider {
         String finish = toolCalls.isEmpty() ? "stop" : "tool_calls";
         return new com.dataclub.llmcascade.service.ChatResult(
             text.toString(), toolCalls.isEmpty() ? null : toolCalls, finish, null);
+    }
+
+    /**
+     * Felder, die Gemini im functionDeclaration-Schema NICHT kennt und mit
+     * 400 INVALID_ARGUMENT ablehnt (Claude Code / JSON-Schema-Draft schickt sie).
+     */
+    private static final java.util.Set<String> GEMINI_SCHEMA_BLOCKLIST = java.util.Set.of(
+        "$schema", "$id", "$ref", "$defs", "$comment", "definitions",
+        "additionalProperties", "unevaluatedProperties", "patternProperties",
+        "dependentSchemas", "dependentRequired", "examples", "const", "title",
+        "default", "$anchor", "additionalItems", "unevaluatedItems"
+    );
+
+    /**
+     * Saeubert ein JSON-Schema rekursiv auf den von Gemini akzeptierten Subset:
+     * entfernt die Blocklist-Felder und steigt in properties/items/anyOf/allOf/oneOf ab.
+     */
+    @SuppressWarnings("unchecked")
+    private static Object sanitizeSchema(Object node) {
+        if (node instanceof Map<?, ?> mapIn) {
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            for (Map.Entry<?, ?> e : mapIn.entrySet()) {
+                String key = String.valueOf(e.getKey());
+                if (GEMINI_SCHEMA_BLOCKLIST.contains(key)) continue;
+                // JSON-Schema erlaubt "type":["string","null"] (nullable). Gemini
+                // will type als EINZELNEN String -> Liste kollabieren; enthaelt sie
+                // "null", zusaetzlich nullable:true setzen (das kennt Gemini).
+                if ("type".equals(key) && e.getValue() instanceof List<?> types) {
+                    boolean nullable = false;
+                    String primary = null;
+                    for (Object t : types) {
+                        if ("null".equals(t)) nullable = true;
+                        else if (primary == null) primary = String.valueOf(t);
+                    }
+                    out.put("type", primary != null ? primary : "string");
+                    if (nullable) out.put("nullable", true);
+                    continue;
+                }
+                out.put(key, sanitizeSchema(e.getValue()));
+            }
+            return out;
+        }
+        if (node instanceof List<?> listIn) {
+            List<Object> out = new java.util.ArrayList<>();
+            for (Object item : listIn) out.add(sanitizeSchema(item));
+            return out;
+        }
+        return node;
     }
 
     private LlmException mapHttpError(HttpStatusCodeException ex) {
